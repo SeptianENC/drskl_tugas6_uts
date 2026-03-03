@@ -40,17 +40,74 @@ func seedOldKeysHandler(r *redis.ClusterClient, ctx context.Context) gin.Handler
 // Value: data payload dalam bentuk map
 // TTLSeconds: waktu hidup data di Redis (dalam detik)
 // CacheHint: petunjuk apakah data ini hot (sering diakses) atau tidak
+// RequestID: idempotency key opsional (jika dikirim sama berulang kali, server akan menghindari double-processing selama masih tersimpan di Redis)
 type Event struct {
 	Key        string                 `json:"key"`
 	Value      map[string]any         `json:"value"`
 	TTLSeconds int                    `json:"ttl_sec"`
 	CacheHint  string                 `json:"cache_hint"`
+	RequestID  string                 `json:"request_id"`
+}
+
+const (
+	idemPrefix           = "idem:req:"
+	defaultRedisTimeout  = 2 * time.Second
+	defaultRedisMaxRetry = 3
+)
+
+// getEnvInt membaca integer dari env dengan default.
+func getEnvInt(name string, def int) int {
+	if s := os.Getenv(name); s != "" {
+		if v, err := strconv.Atoi(s); err == nil {
+			return v
+		}
+	}
+	return def
+}
+
+// withRetry menjalankan fn beberapa kali sampai berhasil atau context habis.
+func withRetry(ctx context.Context, maxAttempts int, fn func() error) error {
+	var err error
+	backoff := 50 * time.Millisecond
+	for i := 0; i < maxAttempts; i++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err = fn(); err == nil {
+			return nil
+		}
+		if i < maxAttempts-1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+				backoff *= 2
+			}
+		}
+	}
+	return err
+}
+
+// checkIdempotency mengecek apakah RequestID sudah pernah diproses (disimpan di Redis).
+// Jika ya, akan mengembalikan label "stored" sebelumnya (mis. "redis" / "hdfs").
+func checkIdempotency(ctx context.Context, r *redis.Client, reqID string) (string, bool) {
+	if reqID == "" {
+		return "", false
+	}
+	val, err := r.Get(ctx, idemPrefix+reqID).Result()
+	if err != nil {
+		return "", false
+	}
+	return val, true
 }
 
 func main() {
 	// Inisialisasi koneksi ke Redis cluster (in-memory cache)
 	r := redisx.NewCluster()
 	ctx := context.Background()
+
+	redisTimeoutMs := getEnvInt("INGEST_REDIS_TIMEOUT_MS", int(defaultRedisTimeout.Milliseconds()))
+	redisMaxRetry := getEnvInt("INGEST_REDIS_MAX_RETRY", defaultRedisMaxRetry)
 
 	// Ambil threshold penggunaan memori dari environment variable.
 	// Jika penggunaan memori Redis >= threshold ini, data akan diarahkan ke HDFS.
@@ -94,16 +151,6 @@ func main() {
 			cache.LRU.Add(ev.Key, "cached") // Flag saja, nilai aktual di-cache di path read
 		}
 
-		// Cek rasio penggunaan memori Redis cluster
-		// Jika sudah mencapai threshold (misalnya 80%), alihkan ke HDFS
-		ratio, _ := redisx.ClusterMemRatio(ctx, r)
-		if ratio >= soft {
-			// Simpan ke HDFS karena Redis sudah penuh
-			_ = hdfs.WriteJSONL([]any{ev})
-			c.JSON(200, gin.H{"ok": true, "stored": "hdfs", "mem_ratio": ratio})
-			return
-		}
-
 		// Serialize nilai event ke JSON sebelum disimpan di Redis.
 		// Tambah _ts (timestamp) agar offloader bisa tahu umur data dan memindahkan yang sudah lama ke HDFS.
 		payload := ev.Value
@@ -119,23 +166,72 @@ func main() {
 			return
 		}
 
-		// Coba simpan ke Redis cluster dengan TTL yang ditentukan
-		err = r.Set(ctx, ev.Key, b, time.Duration(ev.TTLSeconds)*time.Second).Err()
-		if err != nil {
-			// Jika gagal menyimpan ke Redis (misalnya karena OOM), fallback ke HDFS
+		// Cek rasio penggunaan memori Redis cluster
+		// Jika sudah mencapai threshold (misalnya 80%), alihkan ke HDFS (overflow pattern).
+		ratio, _ := redisx.ClusterMemRatio(ctx, r)
+		if ratio >= soft {
 			_ = hdfs.WriteJSONL([]any{ev})
-			c.JSON(200, gin.H{"ok": true, "stored": "hdfs", "error": err.Error(), "mem_ratio": ratio})
+			c.JSON(200, gin.H{"ok": true, "stored": "hdfs", "reason": "redis_soft_limit", "mem_ratio": ratio})
 			return
 		}
+
+		// Konteks khusus untuk operasi Redis (timeout + retry)
+		redisCtx, cancel := context.WithTimeout(ctx, time.Duration(redisTimeoutMs)*time.Millisecond)
+		defer cancel()
+
+		// Idempotency: jika RequestID dikirim dan sudah pernah diproses, hindari double-processing.
+		if ev.RequestID != "" {
+			if stored, ok := checkIdempotency(redisCtx, r, ev.RequestID); ok {
+				c.JSON(200, gin.H{
+					"ok":          true,
+					"stored":      stored,
+					"idempotent":  true,
+					"mem_ratio":   ratio,
+					"request_id":  ev.RequestID,
+					"redis_retry": 0,
+				})
+				return
+			}
+		}
+
+		var lastErr error
+		err = withRetry(redisCtx, redisMaxRetry, func() error {
+			lastErr = r.Set(redisCtx, ev.Key, b, time.Duration(ev.TTLSeconds)*time.Second).Err()
+			return lastErr
+		})
+		if err != nil {
+			// Jika gagal menyimpan ke Redis setelah beberapa kali retry (timeout/network),
+			// fallback ke HDFS sebagai penyimpanan utama sementara.
+			_ = hdfs.WriteJSONL([]any{ev})
+			c.JSON(200, gin.H{
+				"ok":         true,
+				"stored":     "hdfs",
+				"reason":     "redis_unavailable",
+				"error":      lastErr.Error(),
+				"mem_ratio":  ratio,
+				"request_id": ev.RequestID,
+			})
+			return
+		}
+
+		// Jika operasi Redis sukses dan ada RequestID, simpan marker idempotency.
+		if ev.RequestID != "" {
+			_ = r.Set(ctx, idemPrefix+ev.RequestID, "redis", 10*time.Minute).Err()
+		}
+
 		// Berhasil disimpan di Redis
-		c.JSON(200, gin.H{"ok": true, "stored": "redis", "mem_ratio": ratio})
+		c.JSON(200, gin.H{
+			"ok":         true,
+			"stored":     "redis",
+			"mem_ratio":  ratio,
+			"request_id": ev.RequestID,
+		})
 	})
 
 	// Endpoint GET /get/*key: mengambil data berdasarkan key
 	// Mengimplementasikan cache-aside pattern: cek local cache -> Redis -> HDFS (jika perlu)
 	router.GET("/get/*key", func(c *gin.Context) {
 		key := c.Param("key")
-		// Bersihkan key dari leading slash jika ada
 		if len(key) > 0 && key[0] == '/' {
 			key = key[1:]
 		}
@@ -144,7 +240,7 @@ func main() {
 			return
 		}
 
-		// Cache-aside pattern: cek local LRU cache dulu (jika enabled)
+		// Cache-aside pattern: cek local LRU cache dulu 
 		// Ini mengurangi latency untuk hot keys yang sering diakses
 		if cache.Enabled {
 			if v, ok := cache.LRU.Get("VAL:" + key); ok {
@@ -156,7 +252,7 @@ func main() {
 		// Jika tidak ada di local cache, coba ambil dari Redis cluster
 		val, err := r.Get(ctx, key).Result()
 		if err != nil {
-			// Sesuai diagram: jika tidak ditemukan di cache, baca dari on-disk KV-Store (HDFS)
+			// Jika tidak ditemukan di cache, baca dari on-disk KV-Store (HDFS)
 			if buf, readErr := hdfs.ReadByKey(key); readErr == nil {
 				c.JSON(200, gin.H{"ok": true, "source": "hdfs", "value": string(buf)})
 				return

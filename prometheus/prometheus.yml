@@ -11,13 +11,15 @@ scrape_configs:
       - targets: ['localhost:9090']
 
   # Redis: multi-target pattern agar tiap node punya label instance sendiri
-  # Request: GET http://redis-exporter:9121/scrape?target=redis://redis-1:7001 (dan 7002, 7003)
+  # Termasuk redis-4, redis-5 bila dijalankan via docker-compose-replica.yml (replica nodes)
   - job_name: 'redis_exporter_targets'
     static_configs:
       - targets:
           - redis://redis-1:7001
           - redis://redis-2:7002
           - redis://redis-3:7003
+          - redis://redis-4:7004
+          - redis://redis-5:7005
         labels:
           component: 'redis-cluster'
           storage_type: 'in-memory-cache'

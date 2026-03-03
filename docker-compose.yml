@@ -203,6 +203,9 @@ services:
       - HDFS_PATH=/events_overflow
       - REDIS_MAXMEM_SOFT=0.80
       - LOCAL_CACHE_HOTKEYS=1
+      # Timeout & retry untuk operasi Redis di /ingest
+      - INGEST_REDIS_TIMEOUT_MS=2000      # 2s per percobaan (best practice: cepat fail)
+      - INGEST_REDIS_MAX_RETRY=3         # total ~6–7s sebelum fallback ke HDFS
     depends_on:
       - redis-cluster-init
       - namenode

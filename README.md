@@ -1,13 +1,22 @@
-# Data Storage Apps — Simulasi Penyimpanan Data Monolith (TikTok)
+# DDIA Part 2 — Simulasi Sistem Data Terdistribusi
 
-Simulasi lapisan **data storage** pada arsitektur monolith sistem rekomendasi (TikTok): **in-memory cache** dengan Redis Cluster dan **on-disk KV store** dengan HDFS. Data yang tidak muat di Redis (karena limit memori kecil) secara otomatis di-overflow ke HDFS agar sistem tetap berjalan optimal.
+Repo ini mensimulasikan konsep utama dari **Designing Data-Intensive Applications (DDIA), Part II** tentang bagaimana sistem data terdistribusi bekerja:
 
-**Tech stack:** Go (Gin), Redis Cluster (3 node), HDFS, Prometheus, Grafana.
+- **Replication**: Redis Cluster dengan master–replica + HDFS dengan beberapa DataNode.
+- **Partitioning & Routing**: Redis Cluster (hash slots) + hot/cold keys yang tersebar ke beberapa shard.
+- **Consistency**: cache-aside Redis → HDFS dengan offloader + GET yang membaca dari Redis atau HDFS.
+- **Rebalancing**: operasi `CLUSTER REBALANCE` + penambahan node replica.
+- **Permasalahan data terdistribusi**:
+  - **Unreliable / async network**: timeout + retry + fallback ke HDFS.
+  - **Fault detection**: kombinasi log (offloader, ingestor), metric (Prometheus/Grafana), dan health check (Uptime Kuma).
+
+**Tech stack:** Go (Gin), Redis Cluster (3+2 node), HDFS (1 Namenode + beberapa Datanode), Prometheus, Grafana, Uptime Kuma.
 
 ---
 
 ## Daftar Isi
 
+- [Mapping Konsep DDIA Part 2](#mapping-konsep-ddia-part-2)
 - [Arsitektur](#arsitektur)
 - [Prasyarat](#prasyarat)
 - [Quick Start](#quick-start)
@@ -15,15 +24,43 @@ Simulasi lapisan **data storage** pada arsitektur monolith sistem rekomendasi (T
 - [Cara Penggunaan](#cara-penggunaan)
 - [Konfigurasi](#konfigurasi)
 - [Monitoring](#monitoring)
+- [Simulasi Konsep DDIA Part 2](#simulasi-konsep-ddia-part-2-replication-partitioning-consistency-fault)
 - [Akses Redis Cluster](#akses-redis-cluster)
 - [Akses HDFS](#akses-hdfs)
 - [Struktur Project](#struktur-project)
 
 ---
 
+## Mapping Konsep DDIA Part 2
+
+Secara ringkas, implementasi ini memetakan konsep DDIA Part 2 sebagai berikut:
+
+- **Replication**
+  - Redis: master–replica melalui `docker-compose-replica.yml` (`redis-4`, `redis-5` sebagai slave).
+  - HDFS: beberapa DataNode dengan `dfs.replication=2` (blok file direplikasi ke beberapa node).
+- **Partitioning & Routing**
+  - Redis Cluster: 3 master (`redis-1`, `redis-2`, `redis-3`) membagi key-space menggunakan **hash slots**.
+  - Client (Ingestor) memakai `redis.ClusterClient` → routing key → shard otomatis.
+- **Consistency**
+  - Cache-aside: Ingestor menulis ke Redis, offloader memindahkan data lama ke HDFS.
+  - Read path `/get/<key>`: `local LRU → Redis → HDFS`, sehingga data tetap bisa dibaca walau sudah di-offload.
+  - Idempotensi di `/ingest` dengan `request_id` + marker di Redis.
+- **Rebalancing**
+  - Bisa didemokan dengan `redis-cli --cluster rebalance`, serta penambahan replica via `redis-cluster-replica-init`.
+- **Permasalahan data terdistribusi**
+  - **Unreliable / async network**: Ingestor punya timeout + retry ke Redis, lalu fallback ke HDFS.
+  - **Fault detection**:
+    - Log: offloader (`offload run`, `offload write failed`), ingestor.
+    - Metrics: Prometheus + Grafana (Redis/HDFS dashboards).
+    - Health check: Uptime Kuma memantau `/health` dan service lain, lalu relay ke Telegram/Slack.
+
+Bagian-bagian berikut menjelaskan detail arsitektur dan cara mensimulasikan tiap konsep di atas.
+
+---
+
 ## Arsitektur
 
-Alur data mengikuti pola **cache-aside** dengan overflow ke disk:
+Alur data mengikuti pola **cache-aside** + **multi-tier storage** dengan overflow ke disk:
 
 ```
   [Log Kafka / Feature Kafka]  (simulasi: Generator)
@@ -38,26 +75,26 @@ Alur data mengikuti pola **cache-aside** dengan overflow ke disk:
               │ Cache miss / Redis penuh
               ▼
       ┌───────────────┐
-      │ On-Disk       │  ← HDFS (1 Namenode + 3 Datanode, simulasi)
+      │ On-Disk       │  ← HDFS (1 Namenode + beberapa Datanode, simulasi)
       │ KV-Store      │
       └───────┬───────┘
               │ Read from KV-Store → [Join] → ...
 ```
 
 - **Ingestor (Go/Gin):** Menerima event via HTTP; simpan ke Redis selama memori di bawah threshold, selain itu tulis ke HDFS.
-- **Redis Cluster:** 3 master node, masing-masing `maxmemory 50mb`, policy `allkeys-lru` — sengaja kecil agar mudah terisi dan memicu overflow ke HDFS.
-- **HDFS:** 1 Namenode + 3 Datanode (simulasi, storage kecil). Menyimpan event overflow dalam format JSONL di path yang dikonfigurasi (default `/events_overflow`).
+- **Redis Cluster:** 3 master node (ditambah replica via `docker-compose-replica.yml`), masing-masing `maxmemory 50mb`, policy `allkeys-lru` — sengaja kecil agar mudah terisi dan memicu overflow ke HDFS. Redis Cluster mengimplementasikan **partitioning + replication**.
+- **HDFS:** 1 Namenode + beberapa Datanode (simulasi, storage kecil). Menyimpan event overflow dalam format JSONL di path yang dikonfigurasi (default `/events_overflow`). Replikasi dilakukan di level blok file (`dfs.replication=2`).
 - **Generator:** Mensimulasikan traffic (user actions/features) dengan mix hot/cold keys ke Ingestor.
 - **Hotkey-manager:** Service pemantauan hot keys di cluster (placeholder untuk perluasan).
 - **Offloader:** Secara periodik memindahkan data yang sudah **terlalu lama** di Redis ke HDFS (on-disk KV store) agar in-memory cache tidak penuh. Sesuai diagram monolith: data di cache yang tidak lagi “segar” di-offload ke KV-store; saat **GET**, jika key tidak ada di Redis, dibaca dari HDFS.
 
 ### Skenario: Offload data lama (Redis → HDFS)
 
-1. **Ingestor** menyimpan setiap event ke Redis dengan field `_ts` (timestamp) di value.
-2. **Offloader** (service terpisah) setiap `OFFLOAD_INTERVAL_SECONDS` (default 60s) melakukan **SCAN** key per shard Redis. Untuk tiap key, jika umur data (`_ts`) lebih dari **OFFLOAD_AFTER_SECONDS** (default 300 = 5 menit), value ditulis ke HDFS di path `/events_overflow/offloaded/<key>.json` lalu key di-**DEL** dari Redis.
-3. **GET** di Ingestor: jika key **ditemukan di Redis** → return dari cache; jika **tidak ada di Redis** → baca dari HDFS (`ReadByKey`) dan return (source: `"hdfs"`).
+1. **Ingestor** menyimpan setiap event ke Redis dengan field `_ts` (timestamp) di value, plus optional `request_id` untuk idempotensi.
+2. **Offloader** (service terpisah) setiap `OFFLOAD_INTERVAL_SECONDS` melakukan **SCAN** key per shard Redis. Untuk tiap key, jika umur data (`_ts`) lebih dari **OFFLOAD_AFTER_SECONDS** atau cluster dalam mode agresif (memori tinggi), value ditulis ke HDFS di path `/events_overflow/offloaded/<key>.json` lalu key di-**DEL** dari Redis.
+3. **GET** di Ingestor: jika key **ditemukan di local LRU** → return `source: "local_cache"`; jika tidak, coba Redis (`source: "redis"`); jika tidak ada di Redis → baca dari HDFS (`ReadByKey`, `source: "hdfs"`).
 
-Dengan ini, data yang “terlalu lama” di cache pindah ke on-disk KV store dan cache tidak penuh; lookup tetap lengkap lewat Redis + HDFS.
+Dengan ini, data yang “terlalu lama” di cache pindah ke on-disk KV store dan cache tidak penuh; lookup tetap lengkap lewat Redis + HDFS, mencerminkan pola **multi-tier storage + eventual consistency** yang dibahas di DDIA.
 
 ---
 
@@ -148,6 +185,7 @@ Request body (JSON):
 | `value`     | object  | Ya     | Payload bebas (user_id, video_id, watch_time, dll) |
 | `ttl_sec`   | number  | Tidak  | TTL di Redis (detik). Default: 3600 |
 | `cache_hint`| string  | Tidak  | `"hot_read"` = prioritaskan di local LRU cache |
+| `request_id`| string  | Tidak  | Idempotency key opsional. Jika dikirim sama berulang, server akan menghindari double-processing selama marker masih ada di Redis |
 
 Contoh:
 

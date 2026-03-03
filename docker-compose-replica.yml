@@ -1,0 +1,122 @@
+version: "3.9"
+
+services:
+  # ============================================
+  # Redis replicas (menjadi slave dari master cluster existing)
+  # ============================================
+  redis-4:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --port 7004
+      --cluster-enabled yes
+      --cluster-config-file nodes-7004.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --maxmemory 50mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+    ports:
+      - "7004:7004"
+    networks:
+      - simnet
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7004", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-5:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --port 7005
+      --cluster-enabled yes
+      --cluster-config-file nodes-7005.conf
+      --cluster-node-timeout 5000
+      --appendonly yes
+      --maxmemory 50mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+    ports:
+      - "7005:7005"
+    networks:
+      - simnet
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7005", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Init sekali jalan: join redis-4 & redis-5 sebagai replica ke cluster existing
+  redis-cluster-replica-init:
+    image: redis:7-alpine
+    depends_on:
+      redis-1:
+        condition: service_healthy
+      redis-2:
+        condition: service_healthy
+      redis-3:
+        condition: service_healthy
+      redis-4:
+        condition: service_healthy
+      redis-5:
+        condition: service_healthy
+    networks:
+      - simnet
+    command: >
+      sh -c "
+      sleep 5 &&
+      # Ambil ID master untuk port 7001 dan 7002 dari cluster existing
+      MASTER1=$(redis-cli -h redis-1 -p 7001 CLUSTER NODES | awk '/7001@/ {print $1}') &&
+      MASTER2=$(redis-cli -h redis-1 -p 7001 CLUSTER NODES | awk '/7002@/ {print $1}') &&
+      echo Master1=$MASTER1 Master2=$MASTER2 &&
+      # Tambah redis-4 sebagai replica dari MASTER1
+      redis-cli --cluster add-node redis-4:7004 redis-1:7001 --cluster-slave --cluster-master-id $MASTER1 --cluster-yes &&
+      # Tambah redis-5 sebagai replica dari MASTER2
+      redis-cli --cluster add-node redis-5:7005 redis-1:7001 --cluster-slave --cluster-master-id $MASTER2 --cluster-yes
+      "
+    restart: "no"
+
+  # ============================================
+  # Extra HDFS DataNodes (replication di level blok HDFS)
+  # ============================================
+  datanode-4:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode-4
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - SERVICE_PRECONDITION=namenode:9870
+    ports:
+      - "9867:9864"   # Web UI datanode-4 di host 9867
+    volumes:
+      - datanode-4-data:/hadoop/dfs/data
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - simnet
+
+  datanode-5:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode-5
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - SERVICE_PRECONDITION=namenode:9870
+    ports:
+      - "9868:9864"   # Web UI datanode-5 di host 9868
+    volumes:
+      - datanode-5-data:/hadoop/dfs/data
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - simnet
+
+networks:
+  simnet:
+    external: true
+
+volumes:
+  datanode-4-data:
+  datanode-5-data:
