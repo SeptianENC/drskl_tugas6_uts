@@ -126,6 +126,7 @@ curl http://localhost:8080/get/test:1
 | **hdfs-exporter**    | 9070            | Metrics HDFS (Namenode JMX) untuk Prometheus |
 | **prometheus**       | 9090            | Scrape & simpan metrics |
 | **grafana**          | 3000            | Dashboard (Redis, HDFS) |
+| **uptime-kuma**      | 3001            | Synthetic monitoring & alert relay (HTTP, ping, dsb.) |
 
 *Generator*, *hotkey-manager*, dan *offloader* tidak expose port; mereka berkomunikasi lewat jaringan internal Docker.
 
@@ -205,6 +206,20 @@ Response (dari HDFS — key sudah di-offload dari Redis):
 
 ```json
 {"ok": true, "source": "hdfs", "value": "{\"user_id\":1001,\"_ts\":1234567890,...}"}
+```
+
+#### GET `/health` — Heartbeat service Ingestor
+
+- Endpoint sederhana untuk **heartbeat** (Uptime Kuma, k8s liveness/readiness, dsb.).
+
+```bash
+curl http://localhost:8080/health
+```
+
+Response:
+
+```json
+{"status": "ok"}
 ```
 
 ### 2. Generator (simulasi traffic)
@@ -301,10 +316,144 @@ Datasource **Prometheus** sudah di-provision dan dipakai sebagai default.
 | Apa              | URL |
 |------------------|-----|
 | Grafana          | http://localhost:3000 |
+| Uptime Kuma      | http://localhost:3001 |
 | Prometheus       | http://localhost:9090 |
 | HDFS Namenode UI | http://localhost:9870 |
 
 ---
+
+## Simulasi Konsep DDIA Part 2 (Replication, Partitioning, Consistency, Fault)
+
+Bagian ini menghubungkan implementasi dengan konsep di buku **Designing Data-Intensive Applications (DDIA), Part II**.
+
+### 1. Partitioning & Routing (Redis Cluster + hot/cold keys)
+
+**Tujuan:** menunjukkan bagaimana key dibagi ke beberapa shard dan client tidak perlu tahu node mana yang menyimpan data.
+
+1. Lihat pembagian slot cluster:
+
+   ```bash
+   docker compose exec redis-1 redis-cli -p 7001 CLUSTER SLOTS
+   ```
+
+2. Lihat hash-slot untuk satu hot key:
+
+   ```bash
+   docker compose exec redis-1 redis-cli -p 7001 CLUSTER KEYSLOT feature:HOT:0
+   ```
+
+3. Di Grafana (dashboard Redis), lihat panel **Redis used memory per node** (`redis_memory_used_bytes` per instance) untuk melihat node mana yang lebih “panas” karena hot keys.
+
+**Kaitannya dengan DDIA:** Redis Cluster memakai **hash partitioning** (slot → node). Client (Ingestor) hanya kirim key, routing shard ditangani oleh driver dan cluster.
+
+### 2. Consistency & Data Movement (Redis → HDFS via Offloader)
+
+**Tujuan:** menunjukkan data yang “terlalu lama” berpindah dari cache ke on-disk KV store dan read path yang tetap konsisten.
+
+1. Seed data lama ke Redis dengan `_ts` di masa lalu:
+
+   ```bash
+   curl "http://localhost:8080/seed-old-keys?count=20"
+   ```
+
+2. Baca salah satu key sebelum offload:
+
+   ```bash
+   curl "http://localhost:8080/get/seed:old:0"
+   # → {"ok":true,"source":"redis",...}
+   ```
+
+3. Pantau offloader:
+
+   ```bash
+   docker compose logs -f offloader
+   ```
+
+   Tunggu sampai muncul baris:
+
+   ```text
+   offload run: scanned=... old=20 moved=20 ...
+   ```
+
+4. Baca lagi key yang sama:
+
+   ```bash
+   curl "http://localhost:8080/get/seed:old:0"
+   # → {"ok":true,"source":"hdfs",...}
+   ```
+
+5. Verifikasi di HDFS:
+
+   ```bash
+   docker compose exec offloader hdfs dfs -ls /events_overflow/offloaded
+   docker compose exec offloader hdfs dfs -cat /events_overflow/offloaded/<nama_file>.json
+   ```
+
+**Kaitannya dengan DDIA:** ini contoh **multi-tier storage + eventual consistency**. Data baru ada di Redis, lalu dipindah ke HDFS berdasarkan umur/memori. Read path (`/get`) selalu mencari di Redis dulu lalu HDFS, sehingga dari sudut pandang klien data tetap konsisten.
+
+### 3. Fault & Partial Failure (HDFS down, Redis up)
+
+**Tujuan:** menunjukkan bagaimana gangguan di satu komponen (HDFS) tidak langsung mematikan keseluruhan sistem, tapi terlihat di metric/log.
+
+1. Matikan Namenode (simulasi HDFS down):
+
+   ```bash
+   docker compose stop namenode
+   ```
+
+2. Seed lagi beberapa key:
+
+   ```bash
+   curl "http://localhost:8080/seed-old-keys?count=5"
+   ```
+
+3. Pantau log offloader:
+
+   ```bash
+   docker compose logs -f offloader
+   ```
+
+   Akan terlihat error seperti:
+
+   ```text
+   offload write failed key="seed:old:0": ...
+   offload run: ... moved=0 write_fail>0 ...
+   ```
+
+4. Di Grafana, panel Redis tetap normal (cluster hidup), sedangkan panel HDFS (capacity, FilesTotal) tidak bergerak.
+
+**Kaitannya dengan DDIA:** contoh **partial failure** di sistem terdistribusi — satu komponen (HDFS) gagal, sementara komponen lain (Redis) tetap melayani request. Deteksinya membutuhkan kombinasi log + metrics.
+
+### 4. Service Health & Alerting (Uptime Kuma + `/health`)
+
+**Tujuan:** mensimulasikan health check dan routing notifikasi ke Telegram/Slack.
+
+1. Pastikan Uptime Kuma jalan:
+
+   ```bash
+   docker compose up -d uptime-kuma
+   ```
+
+2. Buka `http://localhost:3001`, buat akun admin.
+
+3. Tambah monitor baru:
+
+   - **Type**: HTTP(s)
+   - **Friendly Name**: `Ingestor /health`
+   - **URL** (dari container Kuma): `http://ingestor:8080/health`
+   - Interval: 30 detik.
+
+4. (Opsional) Tambah notifikasi Telegram/Slack di menu **Settings → Notifications**, lalu hubungkan ke monitor tersebut.
+
+5. Untuk demo, matikan Ingestor:
+
+   ```bash
+   docker compose stop ingestor
+   ```
+
+   Di UI Kuma, status monitor berubah menjadi **DOWN** dan notifikasi dikirim ke channel yang Anda hubungkan.
+
+**Kaitannya dengan DDIA:** meskipun Kuma sendiri bukan bagian dari data path, ia membantu **observability** dan deteksi otomatis terhadap failure, yang sangat ditekankan di bagian operasional DDIA (monitoring, alerting, SLO).
 
 ## Akses Redis Cluster
 

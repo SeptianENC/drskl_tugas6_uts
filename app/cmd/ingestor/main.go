@@ -69,6 +69,11 @@ func main() {
 	// Setup Gin router untuk HTTP API
 	router := gin.Default()
 
+	// Endpoint GET /health: simple heartbeat untuk Uptime Kuma / monitoring eksternal
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
 	// Endpoint POST /ingest: menerima event dan menyimpannya ke Redis atau HDFS
 	// Mengimplementasikan cache-aside pattern dengan overflow ke HDFS
 	router.POST("/ingest", func(c *gin.Context) {

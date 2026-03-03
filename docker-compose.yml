@@ -210,7 +210,7 @@ services:
       - datanode-2
       - datanode-3
     ports:
-      - "8080:8080"
+      - "8888:8080"
     networks:
       - simnet
     restart: unless-stopped
@@ -309,6 +309,20 @@ services:
     networks:
       - simnet
 
+  # ============================================
+  # Uptime Kuma - synthetic monitoring & alert relay
+  # ============================================
+  uptime-kuma:
+    image: louislam/uptime-kuma:latest
+    container_name: uptime-kuma
+    volumes:
+      - uptime-kuma-data:/app/data
+    ports:
+      - "3001:3001"     # Web UI Uptime Kuma
+    networks:
+      - simnet
+    restart: unless-stopped
+
 # ============================================
 # Networks
 # ============================================
@@ -329,3 +343,4 @@ volumes:
   datanode-3-data:
   prometheus-data:
   grafana-data:
+  uptime-kuma-data:
