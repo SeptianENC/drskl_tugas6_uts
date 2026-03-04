@@ -89,8 +89,8 @@ func withRetry(ctx context.Context, maxAttempts int, fn func() error) error {
 }
 
 // checkIdempotency mengecek apakah RequestID sudah pernah diproses (disimpan di Redis).
-// Jika ya, akan mengembalikan label "stored" sebelumnya (mis. "redis" / "hdfs").
-func checkIdempotency(ctx context.Context, r *redis.Client, reqID string) (string, bool) {
+// Jika ya, akan mengembalikan label "stored".
+func checkIdempotency(ctx context.Context, r *redis.ClusterClient, reqID string) (string, bool) {
 	if reqID == "" {
 		return "", false
 	}
@@ -151,6 +151,9 @@ func main() {
 			cache.LRU.Add(ev.Key, "cached") // Flag saja, nilai aktual di-cache di path read
 		}
 
+		// Cek rasio memori Redis sekali di awal agar tersedia untuk semua response (termasuk error path).
+		ratio, _ := redisx.ClusterMemRatio(ctx, r)
+
 		// Serialize nilai event ke JSON sebelum disimpan di Redis.
 		// Tambah _ts (timestamp) agar offloader bisa tahu umur data dan memindahkan yang sudah lama ke HDFS.
 		payload := ev.Value
@@ -166,9 +169,7 @@ func main() {
 			return
 		}
 
-		// Cek rasio penggunaan memori Redis cluster
-		// Jika sudah mencapai threshold (misalnya 80%), alihkan ke HDFS (overflow pattern).
-		ratio, _ := redisx.ClusterMemRatio(ctx, r)
+		// Jika rasio memori sudah mencapai threshold, alihkan ke HDFS (overflow pattern).
 		if ratio >= soft {
 			_ = hdfs.WriteJSONL([]any{ev})
 			c.JSON(200, gin.H{"ok": true, "stored": "hdfs", "reason": "redis_soft_limit", "mem_ratio": ratio})

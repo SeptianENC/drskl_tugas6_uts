@@ -34,10 +34,22 @@ func main() {
 	forceMemRatio := getFloat("OFFLOAD_FORCE_MEM_RATIO", 0.70)
 	// Saat mode agresif aktif, minimal umur key (detik) agar tetap tidak memindahkan key yang terlalu baru
 	forceMinAgeSec := getInt("OFFLOAD_FORCE_MIN_AGE_SECONDS", 5)
+	// Berapa detik menunggu Redis siap saat startup (menghindari connection refused saat Redis/cluster-init belum selesai)
+	redisInitTimeoutSec := getInt("OFFLOAD_REDIS_INIT_TIMEOUT_SEC", 120)
 
-	log.Printf("offloader: connecting to Redis...")
-	if err := r.Ping(ctx).Err(); err != nil {
-		log.Fatalf("offloader: redis ping failed: %v", err)
+	log.Printf("offloader: connecting to Redis (retry up to %d sec)...", redisInitTimeoutSec)
+	deadline := time.Now().Add(time.Duration(redisInitTimeoutSec) * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		lastErr = r.Ping(ctx).Err()
+		if lastErr == nil {
+			break
+		}
+		log.Printf("offloader: redis ping failed, retry in 5s: %v", lastErr)
+		time.Sleep(5 * time.Second)
+	}
+	if lastErr != nil {
+		log.Fatalf("offloader: redis ping failed after %d sec: %v", redisInitTimeoutSec, lastErr)
 	}
 	log.Printf("offloader started: OFFLOAD_AFTER_SECONDS=%d, OFFLOAD_INTERVAL_SECONDS=%d, OFFLOAD_FORCE_MEM_RATIO=%.2f, OFFLOAD_FORCE_MIN_AGE_SECONDS=%d, HDFS_PATH=%s",
 		offloadAfterSec, intervalSec, forceMemRatio, forceMinAgeSec, os.Getenv("HDFS_PATH"))

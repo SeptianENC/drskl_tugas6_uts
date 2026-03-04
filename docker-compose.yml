@@ -203,9 +203,8 @@ services:
       - HDFS_PATH=/events_overflow
       - REDIS_MAXMEM_SOFT=0.80
       - LOCAL_CACHE_HOTKEYS=1
-      # Timeout & retry untuk operasi Redis di /ingest
-      - INGEST_REDIS_TIMEOUT_MS=2000      # 2s per percobaan (best practice: cepat fail)
-      - INGEST_REDIS_MAX_RETRY=3         # total ~6–7s sebelum fallback ke HDFS
+      - INGEST_REDIS_TIMEOUT_MS=2000
+      - INGEST_REDIS_MAX_RETRY=3 
     depends_on:
       - redis-cluster-init
       - namenode
@@ -260,6 +259,7 @@ services:
       - OFFLOAD_INTERVAL_SECONDS=15
       - OFFLOAD_FORCE_MEM_RATIO=0.60
       - OFFLOAD_FORCE_MIN_AGE_SECONDS=10
+      - OFFLOAD_REDIS_INIT_TIMEOUT_SEC=120   # retry koneksi Redis sampai 2 menit saat startup
     depends_on:
       - redis-cluster-init
       - namenode
@@ -318,8 +318,10 @@ services:
   uptime-kuma:
     image: louislam/uptime-kuma:latest
     container_name: uptime-kuma
+    user: root
     volumes:
       - uptime-kuma-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "3001:3001"     # Web UI Uptime Kuma
     networks:
