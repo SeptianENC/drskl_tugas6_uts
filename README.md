@@ -255,8 +255,12 @@ Data Storage Apps/
 
 ## FAQ: lambat vs cepat, Grafana vs dashboard
 
-**Mengapa pipeline terasa lambat?**  
-Siklus generator = kirim feature → **jeda** (mensimulasikan action terlambat) → kirim action → jeda antar-RPS. Profil lama memakai jeda sampai ~2 menit untuk 10% request. Secara default Compose sekarang memakai **`ACTION_DELAY_PROFILE=fast`** (jeda lebih pendek) dan **`MATERIALIZE_INTERVAL_SECONDS=3`** agar antrian derived lebih cepat dikosongkan. Untuk demo join miss / event sangat terlambat, set `ACTION_DELAY_PROFILE=ddia`.
+**Mengapa dulu throughput sangat rendah meski `RPS` besar?**  
+Generator lama menjalankan **satu pasangan** feature→action **secara berurutan** dan menunggu jeda (sampai puluhan detik) di antara keduanya. Jadi `RPS` hanya mengatur jeda *setelah* satu siklus panjang—**bukan** ratusan pasangan per detik.  
+**Sekarang (mode cepat):** generator memakai **ticker + goroutine**: setiap slot `1/RPS` detik sebuah pasangan baru dimulai **parallel** (jeda feature→action hanya ~0–35 ms). Target throughput mendekati **`RPS` pasangan/detik** (mis. `RPS=100`). Mode **slow motion** dari tombol dashboard memakai satu pasangan demi satu dengan jeda panjang agar mudah dipantau.
+
+**Tombol Slow motion (dashboard :8887)**  
+Menyimpan flag Redis `pipeline:slow_motion`. **ON** = generator mengabaikan ticker cepat dan memproses satu pasangan per waktu dengan jeda DDIA. **OFF** = kembali ke throughput concurrent.
 
 **Kenapa angka Materializer di dashboard (8887) ≠ “files” di Grafana HDFS?**  
 - Dashboard menampilkan **`stats:materializer:batches_total`**: berapa kali materializer menulis satu batch (≈ satu file `part-*.jsonl` di `/derived/...`).  

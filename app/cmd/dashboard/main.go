@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"monolith-kv-sim/internal/activity"
+	"monolith-kv-sim/internal/pipeline"
 	"monolith-kv-sim/internal/redisx"
 )
 
@@ -53,6 +54,9 @@ func main() {
 			_ = json.Unmarshal([]byte(lastBatch), &lastObj)
 		}
 
+		sm, _ := rdb.Get(ctx, pipeline.RedisKeySlowMotion).Result()
+		slowMotion := sm == "1" || sm == "true" || sm == "yes"
+
 		c.JSON(http.StatusOK, gin.H{
 			"feed":                 feed,
 			"queue_training_examples": qLen,
@@ -68,7 +72,28 @@ func main() {
 			"ts":                         time.Now().UTC().Format(time.RFC3339),
 			// Penjelasan metrik vs Grafana (FilesTotal = seluruh namespace HDFS).
 			"help_grafana_vs_dashboard": "Angka besar Materializer di sini = jumlah batch run (counter Redis), setara file JSONL yang ditulis materializer ke /derived. Panel Grafana namenode_FilesTotal menghitung SEMUA file di HDFS (overflow ingestor, offload per-key, derived, dll.) sehingga hampir selalu lebih besar.",
+			"slow_motion":               slowMotion,
+			"generator_rps_hint":        os.Getenv("GENERATOR_RPS_HINT"),
 		})
+	})
+
+	router.POST("/api/slow-motion", func(c *gin.Context) {
+		var body struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
+			return
+		}
+		val := "0"
+		if body.Enabled {
+			val = "1"
+		}
+		if err := rdb.Set(ctx, pipeline.RedisKeySlowMotion, val, 0).Err(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "slow_motion": body.Enabled})
 	})
 
 	router.GET("/health", func(c *gin.Context) {
@@ -214,6 +239,29 @@ const pageHTML = `<!DOCTYPE html>
       line-height: 1.45;
       max-width: 58rem;
     }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+    }
+    .btn {
+      cursor: pointer;
+      font: inherit;
+      padding: 0.45rem 0.9rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #21262d;
+      color: var(--text);
+    }
+    .btn:hover { background: #30363d; }
+    .btn.on {
+      background: #238636;
+      border-color: #3fb950;
+      color: #fff;
+    }
+    .toolbar .hint { font-size: 0.78rem; color: var(--muted); max-width: 36rem; line-height: 1.4; }
   </style>
 </head>
 <body>
@@ -227,6 +275,10 @@ const pageHTML = `<!DOCTYPE html>
     <div class="meta" id="clock">Memuat…</div>
   </header>
   <main>
+    <div class="toolbar">
+      <button type="button" class="btn" id="btnSlow" title="Alihkan slow motion">Slow motion: …</button>
+      <span class="hint" id="rpsHint">Cepat ≈ target RPS concurrent (env <code>RPS</code> di generator). Slow = satu pasangan demi satu dengan jeda panjang agar mudah dibaca.</span>
+    </div>
     <div class="legend">
       <span class="l-ingest">Ingestor (KV / overflow)</span>
       <span class="l-join">Joiner (feature + action)</span>
@@ -284,12 +336,38 @@ const pageHTML = `<!DOCTYPE html>
         document.getElementById("clock").textContent = "Update: " + (d.ts || "") + " · auto-refresh 1.2s";
         var h = document.getElementById("metricHelp");
         if (h && d.help_grafana_vs_dashboard) { h.textContent = d.help_grafana_vs_dashboard; }
+        var b = document.getElementById("btnSlow");
+        if (b) {
+          var sm = !!d.slow_motion;
+          b.textContent = sm ? "Slow motion: ON (klik untuk cepat)" : "Slow motion: OFF (klik untuk lambat)";
+          b.className = sm ? "btn on" : "btn";
+        }
+        var rh = document.getElementById("rpsHint");
+        if (rh && d.generator_rps_hint) {
+          rh.innerHTML = "Cepat ≈ <strong>" + escapeHtml(d.generator_rps_hint) + "</strong> pasangan feature+action/detik (concurrent). Slow = satu pasangan dengan jeda panjang.";
+        }
         renderCards(d);
         renderFeed(d.feed);
       } catch (e) {
         document.getElementById("clock").textContent = "Error: " + e;
       }
     }
+    document.getElementById("btnSlow").addEventListener("click", async function() {
+      try {
+        const r = await fetch("/api/state");
+        const d = await r.json();
+        const next = !d.slow_motion;
+        const p = await fetch("/api/slow-motion", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: next })
+        });
+        if (!p.ok) throw new Error("toggle failed");
+        await tick();
+      } catch (e) {
+        document.getElementById("clock").textContent = "Toggle error: " + e;
+      }
+    });
     tick();
     setInterval(tick, 1200);
   </script>

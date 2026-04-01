@@ -260,6 +260,7 @@ services:
       target: dashboard
     environment:
       - REDIS_STARTUP_NODES=redis-1:7001,redis-2:7002,redis-3:7003
+      - GENERATOR_RPS_HINT=100
     depends_on:
       - redis-cluster-init
     ports:
@@ -299,8 +300,7 @@ services:
       - INGESTOR_URL=http://ingestor:8080
       - ENABLE_LEGACY_INGESTOR=0
       - HOTKEY_RATIO=0.20
-      - RPS=400
-      - ACTION_DELAY_PROFILE=fast
+      - RPS=100
     depends_on:
       - joiner
       - ingestor
