@@ -69,11 +69,8 @@ func main() {
 			"materializer_batches_total": batches,
 			"materializer_last_batch":  lastObj,
 			"redis_cluster_mem_ratio":    memRatio,
-			"ts":                         time.Now().UTC().Format(time.RFC3339),
-			// Penjelasan metrik vs Grafana (FilesTotal = seluruh namespace HDFS).
-			"help_grafana_vs_dashboard": "Angka besar Materializer di sini = jumlah batch run (counter Redis), setara file JSONL yang ditulis materializer ke /derived. Panel Grafana namenode_FilesTotal menghitung SEMUA file di HDFS (overflow ingestor, offload per-key, derived, dll.) sehingga hampir selalu lebih besar.",
-			"slow_motion":               slowMotion,
-			"generator_rps_hint":        os.Getenv("GENERATOR_RPS_HINT"),
+			"ts":          time.Now().UTC().Format(time.RFC3339),
+			"slow_motion": slowMotion,
 		})
 	})
 
@@ -216,9 +213,20 @@ const pageHTML = `<!DOCTYPE html>
     .detail { color: #c9d1d9; word-break: break-all; }
     .empty { padding: 2rem; text-align: center; color: var(--muted); }
     .legend {
-      display: flex; flex-wrap: wrap; gap: 0.75rem;
-      font-size: 0.75rem; color: var(--muted);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      font-size: 0.75rem;
+      color: var(--muted);
       margin-bottom: 0.75rem;
+    }
+    .legend-items {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem;
     }
     .legend span::before {
       content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px;
@@ -228,71 +236,24 @@ const pageHTML = `<!DOCTYPE html>
     .legend .l-join::before { background: var(--joiner); }
     .legend .l-mat::before { background: var(--mat); }
     .legend .l-off::before { background: var(--off); }
-    .callout {
-      font-size: 0.78rem;
-      color: var(--muted);
-      background: #161b22;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 0.65rem 0.85rem;
-      margin-bottom: 0.75rem;
-      line-height: 1.45;
-      max-width: 58rem;
-    }
-    .speed-panel {
-      background: linear-gradient(180deg, #1c2128 0%, #161b22 100%);
-      border: 2px solid #30363d;
-      border-radius: 12px;
-      padding: 1rem 1.25rem;
-      margin-bottom: 1rem;
-    }
-    .speed-row {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 1rem;
-    }
-    .speed-badge {
-      font-size: 0.95rem;
-      font-weight: 800;
-      letter-spacing: 0.04em;
-      padding: 0.5rem 1rem;
-      border-radius: 8px;
-      min-width: 200px;
-      text-align: center;
-    }
-    .speed-badge.speed-fast {
-      background: #238636;
-      color: #fff;
-      border: 1px solid #3fb950;
-    }
-    .speed-badge.speed-slow {
-      background: #9e6a03;
-      color: #fff;
-      border: 1px solid #d29922;
-    }
     .btn-speed {
       cursor: pointer;
       font: inherit;
-      font-size: 1rem;
+      font-size: 0.75rem;
       font-weight: 600;
-      padding: 0.65rem 1.25rem;
-      min-height: 48px;
-      border-radius: 10px;
-      border: 2px solid #58a6ff;
+      padding: 0.4rem 0.75rem;
+      border-radius: 6px;
+      border: 1px solid #58a6ff;
       background: #21262d;
       color: #e6edf3;
-      flex: 1;
-      min-width: 260px;
-      max-width: 420px;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
     .btn-speed:hover { background: #30363d; }
     .btn-speed:active { transform: scale(0.99); }
-    .speed-help {
-      margin: 0.75rem 0 0;
-      font-size: 0.82rem;
-      color: var(--muted);
-      line-height: 1.45;
+    .btn-speed.slow-active {
+      border-color: #d29922;
+      background: #2d2a1e;
     }
   </style>
 </head>
@@ -302,22 +263,15 @@ const pageHTML = `<!DOCTYPE html>
     <div class="meta" id="clock">Memuat…</div>
   </header>
   <main>
-    <section class="speed-panel" aria-label="Kecepatan generator">
-      <div class="speed-row">
-        <div class="speed-badge speed-fast" id="modeBadge">MODE: CEPAT</div>
-        <button type="button" class="btn-speed" id="btnSpeedToggle">
-          Aktifkan slow motion…
-        </button>
+    <div class="legend" aria-label="Legenda pipeline">
+      <div class="legend-items">
+        <span class="l-ingest">Ingestor (KV / overflow)</span>
+        <span class="l-join">Joiner (feature + action)</span>
+        <span class="l-mat">Materializer (→ HDFS JSONL)</span>
+        <span class="l-off">Offloader</span>
       </div>
-      <p class="speed-help" id="rpsHint">Default = mode cepat. Slow motion = satu pasangan feature+action dengan jeda panjang (mudah dibaca di feed).</p>
-    </section>
-    <div class="legend">
-      <span class="l-ingest">Ingestor (KV / overflow)</span>
-      <span class="l-join">Joiner (feature + action)</span>
-      <span class="l-mat">Materializer (→ HDFS JSONL)</span>
-      <span class="l-off">Offloader</span>
+      <button type="button" class="btn-speed" id="btnSpeedToggle" aria-pressed="false" title="Klik untuk slow motion">Slow motion</button>
     </div>
-    <p class="callout" id="metricHelp"></p>
     <div class="grid" id="cards"></div>
     <div class="feed-wrap">
       <h2>Feed aktivitas (terbaru di atas)</h2>
@@ -366,27 +320,13 @@ const pageHTML = `<!DOCTYPE html>
         const r = await fetch("/api/state");
         const d = await r.json();
         document.getElementById("clock").textContent = "Update: " + (d.ts || "") + " · auto-refresh 1.2s";
-        var h = document.getElementById("metricHelp");
-        if (h && d.help_grafana_vs_dashboard) { h.textContent = d.help_grafana_vs_dashboard; }
         var sm = !!d.slow_motion;
-        var badge = document.getElementById("modeBadge");
-        if (badge) {
-          badge.textContent = sm ? "MODE: SLOW MOTION" : "MODE: CEPAT";
-          badge.className = sm ? "speed-badge speed-slow" : "speed-badge speed-fast";
-        }
         var b = document.getElementById("btnSpeedToggle");
         if (b) {
-          b.textContent = sm
-            ? "Kembali ke mode cepat (≈ " + (d.generator_rps_hint || "?") + " pasangan/detik)"
-            : "Aktifkan slow motion (satu per satu, jeda panjang)";
-        }
-        var rh = document.getElementById("rpsHint");
-        if (rh) {
-          var hint = "Mode cepat = default (banyak pasangan concurrent). Klik tombol di atas hanya untuk demo lambat.";
-          if (d.generator_rps_hint) {
-            hint = "Target mode cepat: <strong>" + escapeHtml(d.generator_rps_hint) + "</strong> pasangan feature+action per detik (set <code>RPS</code> di service generator). " + hint;
-          }
-          rh.innerHTML = hint;
+          b.textContent = sm ? "Cepat" : "Slow motion";
+          b.className = sm ? "btn-speed slow-active" : "btn-speed";
+          b.setAttribute("aria-pressed", sm ? "true" : "false");
+          b.title = sm ? "Klik untuk kembali ke mode cepat" : "Klik untuk slow motion (satu pasangan demi satu)";
         }
         renderCards(d);
         renderFeed(d.feed);
