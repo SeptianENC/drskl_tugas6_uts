@@ -46,7 +46,7 @@ Repo ini adalah **lab Docker** yang menggabungkan dua tema dari *Designing Data-
 | | |
 |--|--|
 | **URL** | **http://localhost:8887** |
-| **Isi** | Kartu ringkas: joiner (emit / miss / sukses), counter ingestor, panjang antrian `training_examples`, batch materializer, memori Redis cluster; **feed peristiwa** terbaru dari ingestor, joiner, materializer, offloader, hotkey-manager. |
+| **Isi** | Kartu ringkas: joiner (emit / miss / sukses), panjang antrian `training_examples`, batch materializer, memori Redis cluster; **feed peristiwa** terbaru dari joiner, materializer, offloader, hotkey-manager (dan ingestor jika dipakai). |
 | **Mekanisme** | Setiap layanan menulis baris JSON ke Redis LIST `system:activity_feed` (dipotong ~250 baris). Dashboard membaca Redis + beberapa counter (`stats:*`, `joiner:*`, dll.) lewat `GET /api/state`. |
 | **API** | `GET /api/state` — JSON untuk UI; `GET /health` — liveness. |
 

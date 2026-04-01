@@ -31,7 +31,6 @@ func main() {
 	router.GET("/api/state", func(c *gin.Context) {
 		feed, _ := rdb.LRange(ctx, activity.KeyFeed, 0, 99).Result()
 		qLen, _ := rdb.LLen(ctx, "training_examples").Result()
-		ingest, _ := rdb.Get(ctx, "stats:ingestor:ingest_total").Int64()
 		js, ms, em := int64(0), int64(0), int64(0)
 		if v, err := rdb.Get(ctx, "joiner:join_success_total").Int64(); err == nil {
 			js = v
@@ -60,7 +59,6 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{
 			"feed":                 feed,
 			"queue_training_examples": qLen,
-			"ingest_total":         ingest,
 			"joiner": gin.H{
 				"join_success_total": js,
 				"join_miss_total":    ms,
@@ -168,7 +166,6 @@ const pageHTML = `<!DOCTYPE html>
     }
     .card .big { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
     .card.joiner h3 { color: var(--joiner); }
-    .card.ingest h3 { color: var(--ingest); }
     .card.mat h3 { color: var(--mat); }
     .card.queue h3 { color: var(--warn); }
     .card.mem h3 { color: var(--muted); }
@@ -232,7 +229,6 @@ const pageHTML = `<!DOCTYPE html>
       content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px;
       margin-right: 6px; vertical-align: middle;
     }
-    .legend .l-ingest::before { background: var(--ingest); }
     .legend .l-join::before { background: var(--joiner); }
     .legend .l-mat::before { background: var(--mat); }
     .legend .l-off::before { background: var(--off); }
@@ -265,7 +261,6 @@ const pageHTML = `<!DOCTYPE html>
   <main>
     <div class="legend" aria-label="Legenda pipeline">
       <div class="legend-items">
-        <span class="l-ingest">Ingestor (KV / overflow)</span>
         <span class="l-join">Joiner (feature + action)</span>
         <span class="l-mat">Materializer (→ HDFS JSONL)</span>
         <span class="l-off">Offloader</span>
@@ -289,7 +284,6 @@ const pageHTML = `<!DOCTYPE html>
       const lastStr = last ? JSON.stringify(last, null, 0) : "—";
       document.getElementById("cards").innerHTML = 
         '<div class="card joiner"><h3>Joiner</h3><div class="big">' + (j.emitted_total ?? 0) + '</div><div class="sub">emit · miss: ' + (j.join_miss_total ?? 0) + ' · ok: ' + (j.join_success_total ?? 0) + '</div></div>' +
-        '<div class="card ingest"><h3>Ingestor</h3><div class="big">' + (d.ingest_total ?? 0) + '</div><div class="sub">event masuk (counter)</div></div>' +
         '<div class="card queue"><h3>Antrian derived</h3><div class="big">' + (d.queue_training_examples ?? 0) + '</div><div class="sub">Redis LIST <code>training_examples</code></div></div>' +
         '<div class="card mat"><h3>Materializer (batch runs)</h3><div class="big">' + (d.materializer_batches_total ?? 0) + '</div><div class="sub">Satu angka ≈ satu file part-*.jsonl di /derived. Bukan FilesTotal Grafana.</div><div class="sub">' + lastStr + '</div></div>' +
         '<div class="card mem"><h3>Redis cluster</h3><div class="big">' + ((d.redis_cluster_mem_ratio ?? 0) * 100).toFixed(1) + '%</div><div class="sub">perkiraan mem / max (aggregate)</div></div>';
@@ -297,7 +291,7 @@ const pageHTML = `<!DOCTYPE html>
     function renderFeed(lines) {
       const el = document.getElementById("feed");
       if (!lines || !lines.length) {
-        el.innerHTML = '<div class="empty">Belum ada peristiwa. Jalankan generator / kirim curl ke ingestor atau joiner.</div>';
+        el.innerHTML = '<div class="empty">Belum ada peristiwa. Jalankan generator atau kirim traffic ke joiner.</div>';
         return;
       }
       el.innerHTML = lines.map(function(raw) {
