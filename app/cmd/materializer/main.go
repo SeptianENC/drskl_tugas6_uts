@@ -13,13 +13,16 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"monolith-kv-sim/internal/activity"
 	"monolith-kv-sim/internal/hdfsx"
 	"monolith-kv-sim/internal/redisx"
 )
 
 const (
-	keyFeatureList = "training_examples"
-	spoolDir       = "/tmp/spool"
+	keyFeatureList        = "training_examples"
+	spoolDir              = "/tmp/spool"
+	keyMaterializerBatches = "stats:materializer:batches_total"
+	keyLastBatch          = "materializer:last_batch_json"
 )
 
 func envInt(name string, def int) int {
@@ -54,10 +57,10 @@ func runMaterializer() {
 	tick := time.NewTicker(time.Duration(interval) * time.Second)
 	defer tick.Stop()
 
-	flushSpool(w)
+	flushSpool(ctx, rdb, w)
 	processListBatch(ctx, rdb, w, batch)
 	for range tick.C {
-		flushSpool(w)
+		flushSpool(ctx, rdb, w)
 		processListBatch(ctx, rdb, w, batch)
 	}
 }
@@ -80,17 +83,36 @@ func processListBatch(ctx context.Context, rdb *redis.ClusterClient, w *hdfsx.Wr
 		"training_examples/date=%s/hour=%02d/min=%02d/part-%d.jsonl",
 		now.Format("2006-01-02"), now.Hour(), now.Minute(), now.UnixMilli(),
 	)
+	hdfsOK := true
 	err = w.WriteJSONLToPath(rel, events)
 	if err != nil {
+		hdfsOK = false
 		spoolPath := filepath.Join(spoolDir, fmt.Sprintf("spool_%d.jsonl", now.UnixNano()))
 		if werr := writeLinesFile(spoolPath, vals); werr != nil {
 			fmt.Fprintf(os.Stderr, "materializer: hdfs err %v; spool err %v\n", err, werr)
+			activity.Push(ctx, rdb, "materializer", "batch_failed", fmt.Sprintf("rows=%d hdfs=%v spool=%v", len(vals), err, werr))
 			return
 		}
 		fmt.Fprintf(os.Stderr, "materializer: hdfs write failed, spooled %s: %v\n", spoolPath, err)
+		activity.Push(ctx, rdb, "materializer", "batch_spooled", fmt.Sprintf("rows=%d path=%s", len(vals), spoolPath))
 	}
 	if err2 := rdb.LTrim(ctx, keyFeatureList, int64(len(vals)), -1).Err(); err2 != nil {
 		fmt.Fprintf(os.Stderr, "materializer: LTRIM: %v\n", err2)
+		return
+	}
+	_, _ = rdb.Incr(ctx, keyMaterializerBatches).Result()
+	last := map[string]any{
+		"ts":       now.UTC().Format(time.RFC3339Nano),
+		"rows":     len(vals),
+		"path":     rel,
+		"hdfs_ok":  hdfsOK,
+		"spooled":  !hdfsOK,
+	}
+	if b, e := json.Marshal(last); e == nil {
+		_ = rdb.Set(ctx, keyLastBatch, string(b), 0).Err()
+	}
+	if hdfsOK {
+		activity.Push(ctx, rdb, "materializer", "materialized", fmt.Sprintf("rows=%d hdfs path=%s", len(vals), rel))
 	}
 }
 
@@ -109,7 +131,7 @@ func writeLinesFile(path string, lines []string) error {
 	return w.Flush()
 }
 
-func flushSpool(w *hdfsx.Writer) {
+func flushSpool(ctx context.Context, rdb *redis.ClusterClient, w *hdfsx.Writer) {
 	entries, err := os.ReadDir(spoolDir)
 	if err != nil {
 		return
@@ -152,6 +174,7 @@ func flushSpool(w *hdfsx.Writer) {
 			continue
 		}
 		_ = os.Remove(full)
+		activity.Push(ctx, rdb, "materializer", "spool_flushed_to_hdfs", "file="+e.Name()+" rows="+strconv.Itoa(len(lines)))
 	}
 }
 

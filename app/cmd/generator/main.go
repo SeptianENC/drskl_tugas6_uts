@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"math/rand"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"monolith-kv-sim/internal/activity"
+	"monolith-kv-sim/internal/redisx"
 )
 
 // Event legacy untuk ingestor (opsional, DDIA Part 2).
@@ -54,8 +57,12 @@ func main() {
 
 	rand.Seed(time.Now().UnixNano())
 	interval := time.Second / time.Duration(max(1, rps))
+	rdb := redisx.NewCluster()
+	ctx := context.Background()
+	cycle := 0
 
 	for {
+		cycle++
 		reqID := uuid.NewString()
 		userID := int64(rand.Intn(1_000_000))
 		videoID := pickVideoID(hotVideoIDs, hotRatio)
@@ -104,6 +111,10 @@ func main() {
 		}
 		ba, _ := json.Marshal(act)
 		_, _ = http.Post(joinerURL+"/action", "application/json", bytes.NewReader(ba))
+
+		if cycle%100 == 0 {
+			activity.Push(ctx, rdb, "generator", "load_tick", "feature+action pairs≈"+strconv.Itoa(cycle))
+		}
 
 		time.Sleep(interval)
 	}

@@ -10,10 +10,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"monolith-kv-sim/internal/activity"
 	"monolith-kv-sim/internal/cachex"
 	"monolith-kv-sim/internal/hdfsx"
 	"monolith-kv-sim/internal/redisx"
 )
+
+const keyIngestTotal = "stats:ingestor:ingest_total"
 
 // seedOldKeysHandler menulis N key ke Redis dengan _ts 2 menit lalu agar offloader bisa memindahkan ke HDFS (uji pipeline).
 func seedOldKeysHandler(r *redis.ClusterClient, ctx context.Context) gin.HandlerFunc {
@@ -31,6 +34,7 @@ func seedOldKeysHandler(r *redis.ClusterClient, ctx context.Context) gin.Handler
 			b, _ := json.Marshal(val)
 			_ = r.Set(ctx, key, b, 10*time.Minute).Err()
 		}
+		activity.Push(ctx, r, "ingestor", "seed_old_keys", "count="+strconv.Itoa(count))
 		c.JSON(200, gin.H{"ok": true, "seeded": count, "message": "keys written with _ts 2 min ago; offloader will move them within OFFLOAD_INTERVAL_SECONDS"})
 	}
 }
@@ -165,6 +169,8 @@ func main() {
 		if err != nil {
 			// Jika gagal serialize, fallback ke HDFS
 			_ = hdfs.WriteJSONL([]any{ev})
+			_, _ = r.Incr(ctx, keyIngestTotal).Result()
+			activity.Push(ctx, r, "ingestor", "ingest_overflow", "serialize_err→hdfs key="+ev.Key)
 			c.JSON(200, gin.H{"ok": false, "stored": "hdfs", "error": err.Error(), "mem_ratio": ratio})
 			return
 		}
@@ -172,6 +178,8 @@ func main() {
 		// Jika rasio memori sudah mencapai threshold, alihkan ke HDFS (overflow pattern).
 		if ratio >= soft {
 			_ = hdfs.WriteJSONL([]any{ev})
+			_, _ = r.Incr(ctx, keyIngestTotal).Result()
+			activity.Push(ctx, r, "ingestor", "ingest_overflow", "redis_soft_limit→hdfs key="+ev.Key)
 			c.JSON(200, gin.H{"ok": true, "stored": "hdfs", "reason": "redis_soft_limit", "mem_ratio": ratio})
 			return
 		}
@@ -183,6 +191,7 @@ func main() {
 		// Idempotency: jika RequestID dikirim dan sudah pernah diproses, hindari double-processing.
 		if ev.RequestID != "" {
 			if stored, ok := checkIdempotency(redisCtx, r, ev.RequestID); ok {
+				activity.Push(ctx, r, "ingestor", "ingest_idempotent", "request_id="+ev.RequestID+" stored="+stored)
 				c.JSON(200, gin.H{
 					"ok":          true,
 					"stored":      stored,
@@ -204,6 +213,8 @@ func main() {
 			// Jika gagal menyimpan ke Redis setelah beberapa kali retry (timeout/network),
 			// fallback ke HDFS sebagai penyimpanan utama sementara.
 			_ = hdfs.WriteJSONL([]any{ev})
+			_, _ = r.Incr(ctx, keyIngestTotal).Result()
+			activity.Push(ctx, r, "ingestor", "ingest_fallback", "redis_unavailable→hdfs key="+ev.Key)
 			c.JSON(200, gin.H{
 				"ok":         true,
 				"stored":     "hdfs",
@@ -220,6 +231,8 @@ func main() {
 			_ = r.Set(ctx, idemPrefix+ev.RequestID, "redis", 10*time.Minute).Err()
 		}
 
+		_, _ = r.Incr(ctx, keyIngestTotal).Result()
+		activity.Push(ctx, r, "ingestor", "ingest_ok", "stored=redis key="+ev.Key)
 		// Berhasil disimpan di Redis
 		c.JSON(200, gin.H{
 			"ok":         true,

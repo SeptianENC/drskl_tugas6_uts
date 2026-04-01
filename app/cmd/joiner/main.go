@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"monolith-kv-sim/internal/activity"
 	"monolith-kv-sim/internal/redisx"
 )
 
@@ -82,6 +83,7 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 			return
 		}
+		activity.Push(ctx, rdb, "joiner", "feature_stored", "request_id="+p.RequestID+" video_id="+strconv.FormatInt(p.VideoID, 10))
 		c.JSON(http.StatusOK, gin.H{"ok": true, "stored": "redis", "key": key})
 	})
 
@@ -95,6 +97,7 @@ func main() {
 		raw, err := rdb.Get(ctx, fkey).Result()
 		if err == redis.Nil {
 			_ = rdb.Incr(ctx, keyJoinMiss).Err()
+			activity.Push(ctx, rdb, "joiner", "join_miss", "request_id="+p.RequestID+" label="+p.Label)
 			c.JSON(http.StatusOK, gin.H{"ok": true, "joined": false, "reason": "join_miss"})
 			return
 		}
@@ -110,6 +113,7 @@ func main() {
 			return
 		}
 		if !ok {
+			activity.Push(ctx, rdb, "joiner", "emit_skip_idempotent", "request_id="+p.RequestID)
 			c.JSON(http.StatusOK, gin.H{"ok": true, "joined": false, "reason": "idempotent_skip"})
 			return
 		}
@@ -145,6 +149,7 @@ func main() {
 		}
 		_ = rdb.Incr(ctx, keyJoinSuccess).Err()
 		_ = rdb.Incr(ctx, keyEmitted).Err()
+		activity.Push(ctx, rdb, "joiner", "training_example_emitted", "request_id="+p.RequestID+" label="+p.Label)
 		c.JSON(http.StatusOK, gin.H{"ok": true, "joined": true})
 	})
 

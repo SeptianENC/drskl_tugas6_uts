@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"monolith-kv-sim/internal/activity"
 	"monolith-kv-sim/internal/hdfsx"
 	"monolith-kv-sim/internal/redisx"
 )
@@ -127,6 +128,8 @@ func doOffload(ctx context.Context, r *redis.ClusterClient, hdfs *hdfsx.Writer, 
 	}
 	if scanned > 0 || old > 0 || moved > 0 || writeFail > 0 || parseFail > 0 || forceByMem {
 		log.Printf("offload run: scanned=%d old=%d moved=%d write_fail=%d parse_fail=%d mem_ratio=%.4f force_by_mem=%t (age_cutoff=%d sec, force_min_age=%d sec)", scanned, old, moved, writeFail, parseFail, memRatio, forceByMem, offloadAfterSec, forceMinAgeSec)
+		detail := "scanned=" + strconv.Itoa(scanned) + " moved=" + strconv.Itoa(moved) + " write_fail=" + strconv.Itoa(writeFail)
+		activity.Push(ctx, r, "offloader", "offload_tick", detail)
 	}
 }
 

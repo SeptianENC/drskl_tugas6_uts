@@ -19,6 +19,7 @@ RUN CGO_ENABLED=0 go build -o /out/hotkey-manager ./cmd/hotkey-manager
 RUN CGO_ENABLED=0 go build -o /out/offloader ./cmd/offloader
 RUN CGO_ENABLED=0 go build -o /out/joiner ./cmd/joiner
 RUN CGO_ENABLED=0 go build -o /out/materializer ./cmd/materializer
+RUN CGO_ENABLED=0 go build -o /out/dashboard ./cmd/dashboard
 
 # Hadoop client: salin tree dari image yang sama dengan stack HDFS (bde2020), tanpa wget ke mirror (sering 404/diblokir).
 # Catatan: image base biasanya linux/amd64; di Apple Silicon Docker biasanya meng-emulasi otomatis.
@@ -78,6 +79,13 @@ RUN apk add --no-cache bash curl
 COPY --from=build /out/joiner /app/joiner
 EXPOSE 8080
 ENTRYPOINT ["/app/joiner"]
+
+# ---------- runtime dashboard (live pipeline UI) ----------
+FROM alpine:3.20 AS dashboard
+RUN apk add --no-cache bash curl
+COPY --from=build /out/dashboard /app/dashboard
+EXPOSE 8080
+ENTRYPOINT ["/app/dashboard"]
 
 # ---------- runtime materializer (batch drain list -> HDFS JSONL) ----------
 FROM alpine:3.20 AS materializer

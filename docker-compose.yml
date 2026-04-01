@@ -253,6 +253,21 @@ services:
       - simnet
     restart: unless-stopped
 
+  dashboard:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      target: dashboard
+    environment:
+      - REDIS_STARTUP_NODES=redis-1:7001,redis-2:7002,redis-3:7003
+    depends_on:
+      - redis-cluster-init
+    ports:
+      - "8887:8080"
+    networks:
+      - simnet
+    restart: unless-stopped
+
   materializer:
     build:
       context: ./app
@@ -279,6 +294,7 @@ services:
       dockerfile: Dockerfile
       target: generator
     environment:
+      - REDIS_STARTUP_NODES=redis-1:7001,redis-2:7002,redis-3:7003
       - JOINER_URL=http://joiner:8080
       - INGESTOR_URL=http://ingestor:8080
       - ENABLE_LEGACY_INGESTOR=0
