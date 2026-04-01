@@ -66,6 +66,8 @@ func main() {
 			"materializer_last_batch":  lastObj,
 			"redis_cluster_mem_ratio":    memRatio,
 			"ts":                         time.Now().UTC().Format(time.RFC3339),
+			// Penjelasan metrik vs Grafana (FilesTotal = seluruh namespace HDFS).
+			"help_grafana_vs_dashboard": "Angka besar Materializer di sini = jumlah batch run (counter Redis), setara file JSONL yang ditulis materializer ke /derived. Panel Grafana namenode_FilesTotal menghitung SEMUA file di HDFS (overflow ingestor, offload per-key, derived, dll.) sehingga hampir selalu lebih besar.",
 		})
 	})
 
@@ -201,6 +203,17 @@ const pageHTML = `<!DOCTYPE html>
     .legend .l-join::before { background: var(--joiner); }
     .legend .l-mat::before { background: var(--mat); }
     .legend .l-off::before { background: var(--off); }
+    .callout {
+      font-size: 0.78rem;
+      color: var(--muted);
+      background: #161b22;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.65rem 0.85rem;
+      margin-bottom: 0.75rem;
+      line-height: 1.45;
+      max-width: 58rem;
+    }
   </style>
 </head>
 <body>
@@ -220,6 +233,7 @@ const pageHTML = `<!DOCTYPE html>
       <span class="l-mat">Materializer (→ HDFS JSONL)</span>
       <span class="l-off">Offloader</span>
     </div>
+    <p class="callout" id="metricHelp"></p>
     <div class="grid" id="cards"></div>
     <div class="feed-wrap">
       <h2>Feed aktivitas (terbaru di atas)</h2>
@@ -239,7 +253,7 @@ const pageHTML = `<!DOCTYPE html>
         '<div class="card joiner"><h3>Joiner</h3><div class="big">' + (j.emitted_total ?? 0) + '</div><div class="sub">emit · miss: ' + (j.join_miss_total ?? 0) + ' · ok: ' + (j.join_success_total ?? 0) + '</div></div>' +
         '<div class="card ingest"><h3>Ingestor</h3><div class="big">' + (d.ingest_total ?? 0) + '</div><div class="sub">event masuk (counter)</div></div>' +
         '<div class="card queue"><h3>Antrian derived</h3><div class="big">' + (d.queue_training_examples ?? 0) + '</div><div class="sub">Redis LIST <code>training_examples</code></div></div>' +
-        '<div class="card mat"><h3>Materializer</h3><div class="big">' + (d.materializer_batches_total ?? 0) + '</div><div class="sub">batch ke HDFS · ' + lastStr + '</div></div>' +
+        '<div class="card mat"><h3>Materializer (batch runs)</h3><div class="big">' + (d.materializer_batches_total ?? 0) + '</div><div class="sub">Satu angka ≈ satu file part-*.jsonl di /derived. Bukan FilesTotal Grafana.</div><div class="sub">' + lastStr + '</div></div>' +
         '<div class="card mem"><h3>Redis cluster</h3><div class="big">' + ((d.redis_cluster_mem_ratio ?? 0) * 100).toFixed(1) + '%</div><div class="sub">perkiraan mem / max (aggregate)</div></div>';
     }
     function renderFeed(lines) {
@@ -268,6 +282,8 @@ const pageHTML = `<!DOCTYPE html>
         const r = await fetch("/api/state");
         const d = await r.json();
         document.getElementById("clock").textContent = "Update: " + (d.ts || "") + " · auto-refresh 1.2s";
+        var h = document.getElementById("metricHelp");
+        if (h && d.help_grafana_vs_dashboard) { h.textContent = d.help_grafana_vs_dashboard; }
         renderCards(d);
         renderFeed(d.feed);
       } catch (e) {

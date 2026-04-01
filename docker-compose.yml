@@ -276,7 +276,7 @@ services:
     environment:
       - REDIS_STARTUP_NODES=redis-1:7001,redis-2:7002,redis-3:7003
       - HDFS_PATH=/derived
-      - MATERIALIZE_INTERVAL_SECONDS=10
+      - MATERIALIZE_INTERVAL_SECONDS=3
       - MATERIALIZE_BATCH_SIZE=500
     depends_on:
       - redis-cluster-init
@@ -299,7 +299,8 @@ services:
       - INGESTOR_URL=http://ingestor:8080
       - ENABLE_LEGACY_INGESTOR=0
       - HOTKEY_RATIO=0.20
-      - RPS=200
+      - RPS=400
+      - ACTION_DELAY_PROFILE=fast
     depends_on:
       - joiner
       - ingestor

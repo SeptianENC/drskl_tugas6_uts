@@ -136,15 +136,34 @@ func pickVideoID(hotIDs []int64, hotRatio float64) int64 {
 	return int64(rand.Intn(5_000_000))
 }
 
+// sampleActionDelay mensimulasikan action yang datang setelah feature.
+// Profil `fast` (default): pipeline terasa cepat untuk demo.
+// Profil `ddia`: jeda panjang (sampai ~2 menit) untuk demo join miss / late event — lebih lambat.
 func sampleActionDelay() time.Duration {
+	profile := os.Getenv("ACTION_DELAY_PROFILE")
+	if profile == "" {
+		profile = "fast"
+	}
 	r := rand.Float64()
-	switch {
-	case r < 0.70:
-		return time.Duration(rand.Intn(2000)) * time.Millisecond
-	case r < 0.90:
-		return time.Duration(10+rand.Intn(21)) * time.Second
-	default:
-		return time.Duration(60+rand.Intn(61)) * time.Second
+	switch profile {
+	case "ddia", "slow", "teach":
+		switch {
+		case r < 0.70:
+			return time.Duration(rand.Intn(2000)) * time.Millisecond
+		case r < 0.90:
+			return time.Duration(10+rand.Intn(21)) * time.Second
+		default:
+			return time.Duration(60+rand.Intn(61)) * time.Second
+		}
+	default: // fast
+		switch {
+		case r < 0.70:
+			return time.Duration(rand.Intn(500)) * time.Millisecond
+		case r < 0.90:
+			return time.Duration(1+rand.Intn(5)) * time.Second
+		default:
+			return time.Duration(8+rand.Intn(18)) * time.Second
+		}
 	}
 }
 

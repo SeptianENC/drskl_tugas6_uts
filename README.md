@@ -253,6 +253,17 @@ Data Storage Apps/
 
 ---
 
+## FAQ: lambat vs cepat, Grafana vs dashboard
+
+**Mengapa pipeline terasa lambat?**  
+Siklus generator = kirim feature → **jeda** (mensimulasikan action terlambat) → kirim action → jeda antar-RPS. Profil lama memakai jeda sampai ~2 menit untuk 10% request. Secara default Compose sekarang memakai **`ACTION_DELAY_PROFILE=fast`** (jeda lebih pendek) dan **`MATERIALIZE_INTERVAL_SECONDS=3`** agar antrian derived lebih cepat dikosongkan. Untuk demo join miss / event sangat terlambat, set `ACTION_DELAY_PROFILE=ddia`.
+
+**Kenapa angka Materializer di dashboard (8887) ≠ “files” di Grafana HDFS?**  
+- Dashboard menampilkan **`stats:materializer:batches_total`**: berapa kali materializer menulis satu batch (≈ satu file `part-*.jsonl` di `/derived/...`).  
+- Grafana memakai metrik **`namenode_FilesTotal`**: **jumlah file di seluruh HDFS**, termasuk `/events_overflow` (overflow ingestor), `/events_overflow/offloaded/` (satu file per key offload), plus file di `/derived`. Jadi **FilesTotal hampir selalu lebih besar** dari counter batch materializer saja.
+
+---
+
 ## Lisensi & referensi
 
 - Konsep DDIA: Martin Kleppmann, *Designing Data-Intensive Applications*.  
