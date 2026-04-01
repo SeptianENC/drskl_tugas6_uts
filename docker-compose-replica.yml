@@ -79,8 +79,10 @@ services:
     environment:
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
       - SERVICE_PRECONDITION=namenode:9870
+      - HDFS_CONF_dfs_datanode_hostname=${HDFS_PUBLIC_HOST:-localhost}
+      - HDFS_CONF_dfs_datanode_http_address=0.0.0.0:9867
     ports:
-      - "9867:9864"   # Web UI datanode-4 di host 9867
+      - "9867:9867"
     volumes:
       - datanode-4-data:/hadoop/dfs/data
     networks:
@@ -92,8 +94,10 @@ services:
     environment:
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
       - SERVICE_PRECONDITION=namenode:9870
+      - HDFS_CONF_dfs_datanode_hostname=${HDFS_PUBLIC_HOST:-localhost}
+      - HDFS_CONF_dfs_datanode_http_address=0.0.0.0:9868
     ports:
-      - "9868:9864"   # Web UI datanode-5 di host 9868
+      - "9868:9868"
     volumes:
       - datanode-5-data:/hadoop/dfs/data
     networks:

@@ -111,7 +111,7 @@ Setelah `docker compose up -d`, buka browser ke **8887** sambil generator jalan:
 ## Prasyarat & port
 
 - Docker + Docker Compose v2+
-- Port umum: **8887** (dashboard), **8888** (ingestor), **8890** (joiner), 7001–7003 (Redis), 9870/9000 (HDFS), 9090 (Prometheus), 3000 (Grafana), 3001 (Uptime Kuma), 9070 (hdfs-exporter), **9121–9123** (redis-exporter per node)
+- Port umum: **8887** (dashboard), **8888** (ingestor), **8890** (joiner), 7001–7003 (Redis), 9870/9000 (HDFS NameNode), **9864–9866** (HDFS DataNode HTTP / WebHDFS redirect), 9090 (Prometheus), 3000 (Grafana), 3001 (Uptime Kuma), 9070 (hdfs-exporter), **9121–9123** (redis-exporter per node)
 
 ---
 
@@ -222,6 +222,9 @@ Lebih banyak contoh (fault injection HDFS, Uptime Kuma) dapat diadaptasi dari ve
 
 - Redis dari host: `redis-cli -c -h localhost -p 7001`  
 - HDFS UI: **http://localhost:9870** — browse `/derived` dan `/events_overflow`.  
+- **Unduh file dari UI (WebHDFS) di server publik:** NameNode hanya memicu alur; browser lalu diarahkan ke **DataNode** (port HTTP, biasanya **9864 / 9865 / 9866**). Tanpa konfigurasi tambahan, redirect memakai **hostname container Docker** (bukan domain Anda), sehingga unduhan gagal. Untuk akses dari internet, set di **`.env`** di direktori yang sama dengan `docker-compose.yml`:  
+  `HDFS_PUBLIC_HOST=senc.my.id`  
+  (ganti dengan domain atau IP host yang bisa di-resolve dari browser). Buka firewall untuk **9870**, **9000**, dan **9864–9866** jika perlu. Alternatif: unduh dari mesin yang punya jaringan ke cluster, mis. `docker exec -it namenode hdfs dfs -get /derived/... /tmp/`.  
 - Detail CLI: lihat juga `REDIS_CLUSTER_ACCESS.md` jika ada di repo.
 
 ---

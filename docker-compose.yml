@@ -134,6 +134,8 @@ services:
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
       - HDFS_CONF_dfs_replication=2
       - HDFS_CONF_dfs_blocksize=128m
+      # Agar DataNode bisa mengiklankan hostname publik (WebHDFS redirect dari browser):
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
     ports:
       - "9870:9870" # Web UI
       - "9000:9000" # HDFS port
@@ -153,8 +155,10 @@ services:
     environment:
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
       - SERVICE_PRECONDITION=namenode:9870
+      # Hostname/port yang dipakai WebHDFS saat redirect (set ke domain/IP host di .env untuk akses dari luar Docker)
+      - HDFS_CONF_dfs_datanode_hostname=${HDFS_PUBLIC_HOST:-localhost}
     ports:
-      - "9864:9864" # Web UI
+      - "9864:9864" # WebHDFS / DataNode HTTP (harus sama dengan port di dfs.datanode.http.address, default 9864)
     volumes:
       - datanode-data:/hadoop/dfs/data
     depends_on:
@@ -169,8 +173,11 @@ services:
     environment:
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
       - SERVICE_PRECONDITION=namenode:9870
+      - HDFS_CONF_dfs_datanode_hostname=${HDFS_PUBLIC_HOST:-localhost}
+      # Port internal = port di host agar redirect WebHDFS tidak salah (bukan 9865->9864)
+      - HDFS_CONF_dfs_datanode_http_address=0.0.0.0:9865
     ports:
-      - "9865:9864" # Web UI (host 9865)
+      - "9865:9865"
     volumes:
       - datanode-2-data:/hadoop/dfs/data
     depends_on:
@@ -185,8 +192,10 @@ services:
     environment:
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
       - SERVICE_PRECONDITION=namenode:9870
+      - HDFS_CONF_dfs_datanode_hostname=${HDFS_PUBLIC_HOST:-localhost}
+      - HDFS_CONF_dfs_datanode_http_address=0.0.0.0:9866
     ports:
-      - "9866:9864" # Web UI (host 9866)
+      - "9866:9866"
     volumes:
       - datanode-3-data:/hadoop/dfs/data
     depends_on:
