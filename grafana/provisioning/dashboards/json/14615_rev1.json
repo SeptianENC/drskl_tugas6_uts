@@ -1331,7 +1331,7 @@
     "list": [
       {
         "allValue": null,
-        "current": { "selected": true, "text": "redis_exporter_targets", "value": "redis_exporter_targets" },
+        "current": { "selected": true, "text": "redis_exporter_redis1", "value": "redis_exporter_redis1" },
         "datasource": { "type": "prometheus", "uid": "prometheus" },
         "definition": "label_values(redis_up, job)",
         "hide": 0,

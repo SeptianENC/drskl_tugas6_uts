@@ -1,6 +1,6 @@
 # ---------- build stage ----------
 FROM golang:1.22-alpine AS build
-RUN apk add --no-cache git bash curl openjdk11-jre
+RUN apk add --no-cache git bash curl
 WORKDIR /src
 # Salin go.mod dulu untuk download dependencies
 COPY go.mod ./
@@ -17,17 +17,24 @@ RUN CGO_ENABLED=0 go build -o /out/ingestor ./cmd/ingestor
 RUN CGO_ENABLED=0 go build -o /out/generator ./cmd/generator
 RUN CGO_ENABLED=0 go build -o /out/hotkey-manager ./cmd/hotkey-manager
 RUN CGO_ENABLED=0 go build -o /out/offloader ./cmd/offloader
+RUN CGO_ENABLED=0 go build -o /out/joiner ./cmd/joiner
+RUN CGO_ENABLED=0 go build -o /out/materializer ./cmd/materializer
 
-# Install hadoop client (for hdfs dfs)
-RUN mkdir -p /opt \
- && wget -qO- https://archive.apache.org/dist/hadoop/common/hadoop-3.2.1/hadoop-3.2.1.tar.gz | tar -xz -C /opt \
- && ln -s /opt/hadoop-3.2.1 /opt/hadoop
+# Hadoop client: salin tree dari image yang sama dengan stack HDFS (bde2020), tanpa wget ke mirror (sering 404/diblokir).
+# Catatan: image base biasanya linux/amd64; di Apple Silicon Docker biasanya meng-emulasi otomatis.
+FROM bde2020/hadoop-base:2.0.0-hadoop3.2.1-java8 AS hadoop-vendor
+
+FROM alpine:3.20 AS hadoop-client
+RUN apk add --no-cache bash curl openjdk11-jre
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk
+COPY --from=hadoop-vendor /opt/hadoop-3.2.1 /opt/hadoop-3.2.1
+RUN ln -sf /opt/hadoop-3.2.1 /opt/hadoop
 
 # ---------- runtime ingestor ----------
 FROM alpine:3.20 AS ingestor
 RUN apk add --no-cache bash curl openjdk11-jre
 ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk
-COPY --from=build /opt/hadoop-3.2.1 /opt/hadoop
+COPY --from=hadoop-client /opt/hadoop-3.2.1 /opt/hadoop
 RUN mkdir -p /opt/hadoop/etc/hadoop && printf '%s\n' \
   '<?xml version="1.0"?><configuration>' \
   '<property><name>fs.defaultFS</name><value>hdfs://namenode:9000</value></property>' \
@@ -54,7 +61,7 @@ ENTRYPOINT ["/app/hotkey-manager"]
 FROM alpine:3.20 AS offloader
 RUN apk add --no-cache bash curl openjdk11-jre
 ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk
-COPY --from=build /opt/hadoop-3.2.1 /opt/hadoop
+COPY --from=hadoop-client /opt/hadoop-3.2.1 /opt/hadoop
 # Client HDFS perlu tahu alamat namenode (resolve host "namenode" di Docker network)
 RUN mkdir -p /opt/hadoop/etc/hadoop && printf '%s\n' \
   '<?xml version="1.0"?><configuration>' \
@@ -64,3 +71,24 @@ ENV HADOOP_HOME=/opt/hadoop
 ENV PATH="${HADOOP_HOME}/bin:${PATH}"
 COPY --from=build /out/offloader /app/offloader
 ENTRYPOINT ["/app/offloader"]
+
+# ---------- runtime joiner (stream join + Redis list) ----------
+FROM alpine:3.20 AS joiner
+RUN apk add --no-cache bash curl
+COPY --from=build /out/joiner /app/joiner
+EXPOSE 8080
+ENTRYPOINT ["/app/joiner"]
+
+# ---------- runtime materializer (batch drain list -> HDFS JSONL) ----------
+FROM alpine:3.20 AS materializer
+RUN apk add --no-cache bash curl openjdk11-jre
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk
+COPY --from=hadoop-client /opt/hadoop-3.2.1 /opt/hadoop
+RUN mkdir -p /opt/hadoop/etc/hadoop && printf '%s\n' \
+  '<?xml version="1.0"?><configuration>' \
+  '<property><name>fs.defaultFS</name><value>hdfs://namenode:9000</value></property>' \
+  '</configuration>' > /opt/hadoop/etc/hadoop/core-site.xml
+ENV HADOOP_HOME=/opt/hadoop
+ENV PATH="${HADOOP_HOME}/bin:${PATH}"
+COPY --from=build /out/materializer /app/materializer
+ENTRYPOINT ["/app/materializer"]

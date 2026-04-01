@@ -17,6 +17,7 @@ Repo ini mensimulasikan konsep utama dari **Designing Data-Intensive Application
 ## Daftar Isi
 
 - [Mapping Konsep DDIA Part 2](#mapping-konsep-ddia-part-2)
+- [DDIA Part 3 — Derived data (stream + batch)](#ddia-part-3--derived-data-stream--batch)
 - [Arsitektur](#arsitektur)
 - [Prasyarat](#prasyarat)
 - [Quick Start](#quick-start)
@@ -55,6 +56,70 @@ Secara ringkas, implementasi ini memetakan konsep DDIA Part 2 sebagai berikut:
     - Health check: Uptime Kuma memantau `/health` dan service lain, lalu relay ke Telegram/Slack.
 
 Bagian-bagian berikut menjelaskan detail arsitektur dan cara mensimulasikan tiap konsep di atas.
+
+---
+
+## DDIA Part 3 — Derived data (stream + batch)
+
+Bagian ini menambahkan simulasi **derived data** (bukan system of record): gabungan feature + action menjadi **training examples**, buffer di Redis (LIST), lalu **materialize** ke HDFS sebagai dataset batch. Tanpa Kafka/Flink: stream digantikan HTTP (`/feature`, `/action`), buffer pakai Redis, batch sink pakai HDFS.
+
+| Peran DDIA | Komponen di repo | Penjelasan singkat |
+|------------|------------------|---------------------|
+| **System of record** | Event feature & action (HTTP) | Payload mentah: request_id, user_id, video_id, label, timestamp. |
+| **Stream processing** | **joiner** (Gin) | Menyimpan feature di Redis (`feature:<request_id>`, TTL), menerima action, join → `LPUSH` ke list `training_examples`; miss → `INCR joiner:join_miss_total`; idempotensi `SETNX processed:<request_id>`. |
+| **Derived state** | List Redis `training_examples` | Antrian contoh latihan sebelum ditulis ke disk. |
+| **Batch / materialized view** | **materializer** | Tiap interval: `LRANGE` + `LTRIM`, tulis JSONL ke `/derived/training_examples/date=.../hour=.../min=.../part-*.jsonl`. Jika HDFS gagal → `/tmp/spool`, lalu retry. |
+| **Replay / backfill** | Subcommand `materializer replay` | Baca JSONL dari HDFS untuk partisi `date` + `hour` (opsional `minute`), `LPUSH` kembali ke Redis. |
+
+**Bedakan dari Part 2:** **ingestor** + **offloader** = multi-tier KV / cache overflow (DDIA Part 2). **joiner** + **materializer** = pipeline derived data (Part 3). Keduanya bisa jalan bersamaan; generator default hanya mengisi joiner (`ENABLE_LEGACY_INGESTOR=0`).
+
+### Endpoint joiner (host `http://localhost:8890`)
+
+| Method | Path | Fungsi |
+|--------|------|--------|
+| POST | `/feature` | Body: `request_id`, `user_id`, `video_id`, `ts`, `context` (opsional). Simpan feature dengan TTL (`FEATURE_TTL_SECONDS`, default 300). |
+| POST | `/action` | Body: `request_id`, `label` (mis. `watch_time` / `like` / `click`), `ts`. Join dengan feature; emit ke list atau miss. |
+| GET | `/stats` | JSON: `join_success_total`, `join_miss_total`, `emitted_total`. |
+| GET | `/metrics` | Prometheus text (counter yang sama). |
+| GET | `/health` | Liveness. |
+
+### Generator (dual stream)
+
+1. `POST /feature` dengan `request_id` baru.  
+2. Jeda action: **70%** 0–2 detik, **20%** 10–30 detik, **10%** 60–120 detik (mensimulasikan cepat / sedang / sangat terlambat relatif terhadap TTL fitur, default 300 detik).  
+3. `POST /action` dengan `request_id` yang sama.  
+
+`HOTKEY_RATIO` mengatur proporsi **video_id** panas (50 ID tetap) vs dingin (acak), mirip pola sebelumnya.
+
+### Materializer & replay
+
+- Env: `HDFS_PATH=/derived`, `MATERIALIZE_INTERVAL_SECONDS`, `MATERIALIZE_BATCH_SIZE`, `REDIS_STARTUP_NODES`.  
+- Replay dari container materializer:
+
+```bash
+docker compose exec materializer /app/materializer replay -date 2026-04-01 -hour 14
+# Partisi menit tunggal:
+docker compose exec materializer /app/materializer replay -date 2026-04-01 -hour 14 -minute 30
+```
+
+- Cek file di HDFS:
+
+```bash
+docker compose exec materializer hdfs dfs -ls -R /derived/training_examples
+docker compose exec materializer hdfs dfs -cat '/derived/training_examples/date=2026-04-01/hour=*/min=*/part-*.jsonl' 2>/dev/null | head -3
+```
+
+(Gunakan path konkret dari output `ls -R`.)
+
+### Demo tiga skenario
+
+1. **Join sukses (cepat):** mayoritas action dalam 0–2 detik — `GET http://localhost:8890/stats` → `join_success_total` dan `emitted_total` naik, `join_miss_total` rendah.  
+2. **Late tapi masih join:** set `FEATURE_TTL_SECONDS=600`, jalankan generator — action dengan jeda 10–30 detik masih sering dapat feature.  
+3. **Join miss:** turunkan TTL, mis. `FEATURE_TTL_SECONDS=30`, biarkan generator jalan — sebagian action (jeda 60–120 detik) datang setelah feature hilang → `join_miss_total` naik jelas.  
+
+### Monitoring
+
+Prometheus meng-scrape tiga **redis-exporter** terpisah (`redis-exporter-{1,2,3}` → port host 9121–9123) dan **joiner** di `:8080` path `/metrics`. Di UI Prometheus → Status → Targets, pastikan job `redis_exporter_redis*`, `joiner`, dan `hdfs` **UP**.
 
 ---
 
@@ -102,7 +167,7 @@ Dengan ini, data yang “terlalu lama” di cache pindah ke on-disk KV store dan
 
 - **Docker** dan **Docker Compose** (v2+)
 - **Git** (opsional, untuk clone)
-- Port yang tidak bentrok: 3000, 7001–7003, 8080, 9090, 9070, 9121, 9870, 9000, 9864, 9865, 9866
+- Port yang tidak bentrok: 3000, 7001–7003, 8888 (ingestor), 8890 (joiner), 9090, 9070, 9121–9123 (redis-exporter per node), 9870, 9000, 9864, 9865, 9866
 
 ---
 
@@ -139,12 +204,12 @@ Semua service seharusnya berstatus **running** (kecuali `redis-cluster-init` yan
 
 ```bash
 # Kirim satu event
-curl -X POST http://localhost:8080/ingest \
+curl -X POST http://localhost:8888/ingest \
   -H "Content-Type: application/json" \
   -d '{"key":"test:1","value":{"user_id":1,"video_id":10},"ttl_sec":3600,"cache_hint":"none"}'
 
 # Baca kembali
-curl http://localhost:8080/get/test:1
+curl http://localhost:8888/get/test:1
 ```
 
 ---
@@ -153,19 +218,20 @@ curl http://localhost:8080/get/test:1
 
 | Service              | Port (host)     | Fungsi |
 |----------------------|-----------------|--------|
-| **ingestor**         | 8080            | API HTTP: ingest & get (cache-aside + overflow HDFS) |
+| **ingestor**         | 8888 (→8080)    | API HTTP: ingest & get (cache-aside + overflow HDFS) |
+| **joiner**           | 8890 (→8080)    | Stream join feature+action → training examples (Redis LIST) |
 | **redis-1, 2, 3**    | 7001, 7002, 7003 | Redis Cluster (in-memory cache) |
 | **namenode**         | 9870 (Web UI), 9000 (HDFS) | HDFS Namenode |
 | **datanode**         | 9864 (Web UI)   | HDFS Datanode 1 |
 | **datanode-2**       | 9865 (Web UI)   | HDFS Datanode 2 |
 | **datanode-3**       | 9866 (Web UI)   | HDFS Datanode 3 |
-| **redis-exporter**   | 9121            | Metrics Redis untuk Prometheus |
+| **redis-exporter-1,2,3** | 9121, 9122, 9123 | Metrics Redis (satu exporter per node master) |
 | **hdfs-exporter**    | 9070            | Metrics HDFS (Namenode JMX) untuk Prometheus |
 | **prometheus**       | 9090            | Scrape & simpan metrics |
 | **grafana**          | 3000            | Dashboard (Redis, HDFS) |
 | **uptime-kuma**      | 3001            | Synthetic monitoring & alert relay (HTTP, ping, dsb.) |
 
-*Generator*, *hotkey-manager*, dan *offloader* tidak expose port; mereka berkomunikasi lewat jaringan internal Docker.
+*Materializer*, *generator*, *hotkey-manager*, dan *offloader* tidak expose port ke host (kecuali generator yang mengakses joiner/ingestor secara internal); joiner dan ingestor dapat diuji dari host lewat port di tabel.
 
 ---
 
@@ -173,7 +239,7 @@ curl http://localhost:8080/get/test:1
 
 ### 1. API Ingestor (HTTP)
 
-Base URL (dari host): **http://localhost:8080**
+Base URL (dari host): **http://localhost:8888** (mapping `8888:8080` di compose)
 
 #### POST `/ingest` — Menyimpan event
 
@@ -190,7 +256,7 @@ Request body (JSON):
 Contoh:
 
 ```bash
-curl -X POST http://localhost:8080/ingest \
+curl -X POST http://localhost:8888/ingest \
   -H "Content-Type: application/json" \
   -d '{
     "key": "feature:user:1001",
@@ -225,7 +291,7 @@ Response sukses (overflow ke HDFS karena memori penuh):
 Contoh:
 
 ```bash
-curl http://localhost:8080/get/feature:user:1001
+curl http://localhost:8888/get/feature:user:1001
 ```
 
 Response (dari Redis):
@@ -251,7 +317,7 @@ Response (dari HDFS — key sudah di-offload dari Redis):
 - Endpoint sederhana untuk **heartbeat** (Uptime Kuma, k8s liveness/readiness, dsb.).
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:8888/health
 ```
 
 Response:
@@ -292,7 +358,9 @@ Konfigurasi utama lewat **environment variables** di `docker-compose.yml`.
 
 | Variable       | Default | Keterangan |
 |----------------|--------|------------|
-| `INGESTOR_URL` | http://ingestor:8080 | URL Ingestor |
+| `JOINER_URL`   | — (default lokal `http://localhost:8890` hanya untuk run di luar Compose) | Di Compose: `http://joiner:8080` |
+| `INGESTOR_URL` | http://ingestor:8080 | URL Ingestor (hanya dipakai jika `ENABLE_LEGACY_INGESTOR=1`) |
+| `ENABLE_LEGACY_INGESTOR` | 0 | `1` = juga kirim event lama ke `/ingest` (Part 2) |
 | `RPS`          | 200    | Request per detik |
 | `HOTKEY_RATIO` | 0.20   | Rasio request yang pakai hot key (0–1) |
 
@@ -314,6 +382,25 @@ Konfigurasi utama lewat **environment variables** di `docker-compose.yml`.
 | `REDIS_STARTUP_NODES`    | ...    | Sama seperti Ingestor |
 | `HOTKEY_THRESHOLD_PER_MIN` | 2000 | Batas hit per menit untuk dianggap hot (untuk perluasan) |
 | `ENABLE_RESHARD`         | 0      | 1 = enable placeholder reshard |
+
+### Joiner
+
+| Variable | Default | Keterangan |
+|----------|---------|------------|
+| `REDIS_STARTUP_NODES` | (wajib di Compose) | Node Redis Cluster |
+| `FEATURE_TTL_SECONDS` | 300 | TTL key `feature:<request_id>` |
+| `PROCESSED_TTL_SECONDS` | 3600 | TTL `processed:<request_id>` (idempotensi emit) |
+
+### Materializer
+
+| Variable | Default | Keterangan |
+|----------|---------|------------|
+| `REDIS_STARTUP_NODES` | — | Node Redis Cluster |
+| `HDFS_PATH` | `/derived` | Prefix HDFS untuk file JSONL |
+| `MATERIALIZE_INTERVAL_SECONDS` | 10 | Interval drain list |
+| `MATERIALIZE_BATCH_SIZE` | 500 | Maksimal baris per batch |
+
+**Build image HDFS (ingestor / offloader / materializer):** `Dockerfile` menyalin `hadoop-3.2.1` dari image `bde2020/hadoop-base:2.0.0-hadoop3.2.1-java8` (sama versi dengan Namenode/Datanode di compose), sehingga tidak bergantung `wget` ke mirror Apache yang sering diblokir.
 
 ### Redis (per node)
 
@@ -346,7 +433,7 @@ Datasource **Prometheus** sudah di-provision dan dipakai sebagai default.
 ### Prometheus
 
 - URL: **http://localhost:9090**
-- Menu **Status → Targets**: cek bahwa target Redis (`redis_exporter_targets`) dan HDFS (`hdfs`) status **UP**.
+- Menu **Status → Targets**: cek bahwa job `redis_exporter_redis1`, `redis_exporter_redis2`, `redis_exporter_redis3`, `joiner`, dan `hdfs` status **UP**.
 - Menu **Graph**: bisa cek metric, mis. `redis_memory_used_bytes`, `namenode_CapacityUsed`.
 
 ### Ringkasan akses
@@ -391,13 +478,13 @@ Bagian ini menghubungkan implementasi dengan konsep di buku **Designing Data-Int
 1. Seed data lama ke Redis dengan `_ts` di masa lalu:
 
    ```bash
-   curl "http://localhost:8080/seed-old-keys?count=20"
+   curl "http://localhost:8888/seed-old-keys?count=20"
    ```
 
 2. Baca salah satu key sebelum offload:
 
    ```bash
-   curl "http://localhost:8080/get/seed:old:0"
+   curl "http://localhost:8888/get/seed:old:0"
    # → {"ok":true,"source":"redis",...}
    ```
 
@@ -416,7 +503,7 @@ Bagian ini menghubungkan implementasi dengan konsep di buku **Designing Data-Int
 4. Baca lagi key yang sama:
 
    ```bash
-   curl "http://localhost:8080/get/seed:old:0"
+   curl "http://localhost:8888/get/seed:old:0"
    # → {"ok":true,"source":"hdfs",...}
    ```
 
@@ -442,7 +529,7 @@ Bagian ini menghubungkan implementasi dengan konsep di buku **Designing Data-Int
 2. Seed lagi beberapa key:
 
    ```bash
-   curl "http://localhost:8080/seed-old-keys?count=5"
+   curl "http://localhost:8888/seed-old-keys?count=5"
    ```
 
 3. Pantau log offloader:
@@ -589,18 +676,19 @@ Data Storage Apps/
 │               ├── 14615_rev1.json     # Dashboard Redis (varian lain untuk cluster)
 │               └── hdfs.json           # Dashboard HDFS
 └── app/
-    ├── Dockerfile              # Multi-stage build (ingestor, generator, hotkey-manager, offloader)
+    ├── Dockerfile              # Multi-stage build (ingestor, generator, hotkey-manager, offloader, joiner, materializer)
     ├── go.mod / go.sum
     ├── cmd/
     │   ├── ingestor/           # API HTTP + cache-aside + overflow HDFS + GET fallback dari HDFS + /health + /seed-old-keys
-    │   ├── generator/          # Simulasi traffic (hot/cold keys) ke Ingestor
+    │   ├── generator/          # Simulasi traffic: feature+action ke joiner (opsional legacy ke ingestor)
+    │   ├── joiner/             # Stream join: /feature, /action → Redis LIST training_examples
+    │   ├── materializer/       # Batch: drain LIST → JSONL di HDFS; subcommand `replay`
     │   ├── hotkey-manager/     # Pemantauan cluster (placeholder deteksi hot keys / reshard)
     │   └── offloader/          # Worker: pindahkan data lama dari Redis ke HDFS (per key), log statistik
     └── internal/
         ├── cachex/             # LRU cache (hot keys) di sisi Ingestor
-        ├── hdfsx/              # Writer/reader HDFS (JSONL + offloaded KV per key)
-        ├── redisx/             # Redis Cluster client + utilitas (ClusterMemRatio, dsb.)
-        └── metrics/            # (placeholder) paket untuk metric internal (bila ingin menambah Prometheus client / custom metrics)
+        ├── hdfsx/              # Writer/reader HDFS (JSONL + offloaded KV + path JSONL derived)
+        └── redisx/             # Redis Cluster client + utilitas (ClusterMemRatio, dsb.)
 ```
 
 ---

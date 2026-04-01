@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   # ============================================
   # Redis Cluster - 3 nodes untuk in-memory cache
@@ -94,11 +92,32 @@ services:
       - simnet
     restart: "no"
 
-  redis-exporter:
+  # Satu exporter per node master — addr eksplisit (bukan redis.addr kosong).
+  redis-exporter-1:
     image: oliver006/redis_exporter:latest
-    command: ["--redis.addr="]
+    command: ["--redis.addr=redis://redis-1:7001"]
     ports:
       - "9121:9121"
+    depends_on:
+      - redis-cluster-init
+    networks:
+      - simnet
+
+  redis-exporter-2:
+    image: oliver006/redis_exporter:latest
+    command: ["--redis.addr=redis://redis-2:7002"]
+    ports:
+      - "9122:9121"
+    depends_on:
+      - redis-cluster-init
+    networks:
+      - simnet
+
+  redis-exporter-3:
+    image: oliver006/redis_exporter:latest
+    command: ["--redis.addr=redis://redis-3:7003"]
+    ports:
+      - "9123:9121"
     depends_on:
       - redis-cluster-init
     networks:
@@ -217,16 +236,56 @@ services:
       - simnet
     restart: unless-stopped
 
+  joiner:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      target: joiner
+    environment:
+      - REDIS_STARTUP_NODES=redis-1:7001,redis-2:7002,redis-3:7003
+      - FEATURE_TTL_SECONDS=300
+      - PROCESSED_TTL_SECONDS=3600
+    depends_on:
+      - redis-cluster-init
+    ports:
+      - "8890:8080"
+    networks:
+      - simnet
+    restart: unless-stopped
+
+  materializer:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+      target: materializer
+    environment:
+      - REDIS_STARTUP_NODES=redis-1:7001,redis-2:7002,redis-3:7003
+      - HDFS_PATH=/derived
+      - MATERIALIZE_INTERVAL_SECONDS=10
+      - MATERIALIZE_BATCH_SIZE=500
+    depends_on:
+      - redis-cluster-init
+      - namenode
+      - datanode
+      - datanode-2
+      - datanode-3
+    networks:
+      - simnet
+    restart: unless-stopped
+
   generator:
     build:
       context: ./app
       dockerfile: Dockerfile
       target: generator
     environment:
+      - JOINER_URL=http://joiner:8080
       - INGESTOR_URL=http://ingestor:8080
+      - ENABLE_LEGACY_INGESTOR=0
       - HOTKEY_RATIO=0.20
       - RPS=200
     depends_on:
+      - joiner
       - ingestor
     networks:
       - simnet
@@ -286,7 +345,9 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     depends_on:
-      - redis-exporter
+      - redis-exporter-1
+      - redis-exporter-2
+      - redis-exporter-3
       - hdfs-exporter
     networks:
       - simnet

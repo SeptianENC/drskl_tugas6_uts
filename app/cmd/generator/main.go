@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Event merepresentasikan data event yang akan dikirim ke ingestor service
+// Event legacy untuk ingestor (opsional, DDIA Part 2).
 type Event struct {
 	Key        string         `json:"key"`
 	Value      map[string]any `json:"value"`
@@ -20,71 +20,123 @@ type Event struct {
 	CacheHint  string         `json:"cache_hint"`
 }
 
+type featureReq struct {
+	RequestID string         `json:"request_id"`
+	UserID    int64          `json:"user_id"`
+	VideoID   int64          `json:"video_id"`
+	Ts        float64        `json:"ts"`
+	Context   map[string]any `json:"context"`
+}
+
+type actionReq struct {
+	RequestID string  `json:"request_id"`
+	Label     string  `json:"label"`
+	Ts        float64 `json:"ts"`
+}
+
+var actionLabels = []string{"watch_time", "like", "click"}
+
 func main() {
-	// Ambil URL ingestor service dari environment variable
-	ingestorURL := os.Getenv("INGESTOR_URL")
-	if ingestorURL == "" {
-		ingestorURL = "http://localhost:8080"
+	joinerURL := os.Getenv("JOINER_URL")
+	if joinerURL == "" {
+		joinerURL = "http://localhost:8890"
 	}
-	// RPS (Requests Per Second): jumlah request yang dikirim per detik
+	ingestorURL := os.Getenv("INGESTOR_URL")
+	legacyIngest := os.Getenv("ENABLE_LEGACY_INGESTOR") == "1"
+
 	rps := getInt("RPS", 200)
-	// HotRatio: proporsi request yang menggunakan hot keys (keys yang sering diakses)
 	hotRatio := getFloat("HOTKEY_RATIO", 0.2)
 
-	// Generate 50 hot keys yang akan digunakan berulang-ulang
-	// Hot keys ini mensimulasikan data yang sering diakses (seperti trending videos)
-	hotKeys := make([]string, 50)
-	for i := range hotKeys {
-		hotKeys[i] = "feature:HOT:" + strconv.Itoa(i)
+	hotVideoIDs := make([]int64, 50)
+	for i := range hotVideoIDs {
+		hotVideoIDs[i] = int64(10_000_000 + i)
 	}
 
-	// Seed random number generator dengan waktu saat ini
 	rand.Seed(time.Now().UnixNano())
-	// Hitung interval antara setiap request berdasarkan RPS
 	interval := time.Second / time.Duration(max(1, rps))
 
-	// Loop utama: generate dan kirim event secara kontinyu
 	for {
-		// Pilih key secara random: hot key atau cold key berdasarkan hotRatio
-		key := pickKey(hotKeys, hotRatio)
-		// Buat event dengan data simulasi (user action, video interaction, dll)
-		ev := Event{
-			Key: key,
-			Value: map[string]any{
-				"user_id":    rand.Intn(1_000_000),                    // Random user ID
-				"video_id":   rand.Intn(5_000_000),                   // Random video ID
-				"ts":         float64(time.Now().UnixNano()) / 1e9,   // Timestamp dalam detik
-				"watch_time": rand.Float64() * 30.0,                  // Waktu menonton (0-30 detik)
+		reqID := uuid.NewString()
+		userID := int64(rand.Intn(1_000_000))
+		videoID := pickVideoID(hotVideoIDs, hotRatio)
+		ts := float64(time.Now().UnixNano()) / 1e9
+
+		feat := featureReq{
+			RequestID: reqID,
+			UserID:    userID,
+			VideoID:   videoID,
+			Ts:        ts,
+			Context: map[string]any{
+				"device": "sim",
+				"hot":    isHotVideo(hotVideoIDs, videoID),
 			},
-			TTLSeconds: 3600, // TTL 1 jam
-			CacheHint:  "none",
 		}
-		// Jika key adalah hot key, tandai dengan cache hint "hot_read"
-		// Ini memberi sinyal ke ingestor untuk cache data ini di local LRU
-		if len(key) >= 12 && key[:12] == "feature:HOT" {
-			ev.CacheHint = "hot_read"
+		bf, _ := json.Marshal(feat)
+		_, _ = http.Post(joinerURL+"/feature", "application/json", bytes.NewReader(bf))
+
+		if legacyIngest && ingestorURL != "" {
+			ev := Event{
+				Key: "feature:" + reqID,
+				Value: map[string]any{
+					"user_id":    userID,
+					"video_id":   videoID,
+					"ts":         ts,
+					"watch_time": rand.Float64() * 30.0,
+				},
+				TTLSeconds: 3600,
+				CacheHint:  "none",
+			}
+			if isHotVideo(hotVideoIDs, videoID) {
+				ev.CacheHint = "hot_read"
+			}
+			bi, _ := json.Marshal(ev)
+			_, _ = http.Post(ingestorURL+"/ingest", "application/json", bytes.NewReader(bi))
 		}
 
-		// Serialize event ke JSON dan kirim ke ingestor service
-		b, _ := json.Marshal(ev)
-		_, _ = http.Post(ingestorURL+"/ingest", "application/json", bytes.NewReader(b))
-		// Tunggu interval sebelum kirim request berikutnya
+		delay := sampleActionDelay()
+		time.Sleep(delay)
+
+		actionTs := float64(time.Now().UnixNano()) / 1e9
+		act := actionReq{
+			RequestID: reqID,
+			Label:     actionLabels[rand.Intn(len(actionLabels))],
+			Ts:        actionTs,
+		}
+		ba, _ := json.Marshal(act)
+		_, _ = http.Post(joinerURL+"/action", "application/json", bytes.NewReader(ba))
+
 		time.Sleep(interval)
 	}
 }
 
-// pickKey memilih key secara random berdasarkan hotRatio.
-// Jika random number < hotRatio, pilih hot key; jika tidak, generate cold key baru.
-// Ini mensimulasikan distribusi traffic: sebagian besar cold, sebagian kecil hot.
-func pickKey(hotKeys []string, hotRatio float64) string {
-	if rand.Float64() < hotRatio {
-		return hotKeys[rand.Intn(len(hotKeys))]
+func isHotVideo(hot []int64, vid int64) bool {
+	for _, h := range hot {
+		if h == vid {
+			return true
+		}
 	}
-	// Generate cold key dengan UUID untuk memastikan unik
-	return "feature:COLD:" + uuid.NewString()
+	return false
 }
 
-// getInt membaca integer dari environment variable dengan default value
+func pickVideoID(hotIDs []int64, hotRatio float64) int64 {
+	if rand.Float64() < hotRatio {
+		return hotIDs[rand.Intn(len(hotIDs))]
+	}
+	return int64(rand.Intn(5_000_000))
+}
+
+func sampleActionDelay() time.Duration {
+	r := rand.Float64()
+	switch {
+	case r < 0.70:
+		return time.Duration(rand.Intn(2000)) * time.Millisecond
+	case r < 0.90:
+		return time.Duration(10+rand.Intn(21)) * time.Second
+	default:
+		return time.Duration(60+rand.Intn(61)) * time.Second
+	}
+}
+
 func getInt(env string, def int) int {
 	if s := os.Getenv(env); s != "" {
 		if v, err := strconv.Atoi(s); err == nil {
@@ -94,7 +146,6 @@ func getInt(env string, def int) int {
 	return def
 }
 
-// getFloat membaca float dari environment variable dengan default value
 func getFloat(env string, def float64) float64 {
 	if s := os.Getenv(env); s != "" {
 		if v, err := strconv.ParseFloat(s, 64); err == nil {
@@ -104,7 +155,6 @@ func getFloat(env string, def float64) float64 {
 	return def
 }
 
-// max mengembalikan nilai maksimum antara dua integer
 func max(a, b int) int {
 	if a > b {
 		return a

@@ -6,7 +6,7 @@
     { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" }
   ],
   "annotations": { "list": [{ "builtIn": 1, "datasource": "-- Grafana --", "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard" }] },
-  "description": "Redis dashboard (style official 12776) untuk Prometheus + redis_exporter. Datasource sudah di-set ke Prometheus. Jika No data: cek Prometheus → Status → Targets (redis_exporter_targets harus UP), pilih Instance = All, dan time range Last 15 min.",
+  "description": "Redis dashboard (style official 12776) untuk Prometheus + redis_exporter. Datasource sudah di-set ke Prometheus. Jika No data: cek Prometheus → Status → Targets (job redis_exporter_redis1/2/3 harus UP), pilih Instance = All, dan time range Last 15 min.",
   "editable": true,
   "gnetId": 12776,
   "graphTooltip": 1,

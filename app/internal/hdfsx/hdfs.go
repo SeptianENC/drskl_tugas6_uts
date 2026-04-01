@@ -112,3 +112,50 @@ func (w *Writer) ReadByKey(key string) ([]byte, error) {
 	}
 	return out, nil
 }
+
+// WriteJSONLToPath menulis JSONL ke path relatif di bawah Writer.Path (mis. HDFS_PATH=/derived → file di /derived/<relativePath>).
+// Membuat direktori parent di HDFS dengan mkdir -p, lalu put file dari /tmp.
+func (w *Writer) WriteJSONLToPath(relativePath string, events []any) error {
+	relativePath = strings.TrimSpace(relativePath)
+	relativePath = strings.TrimPrefix(relativePath, "/")
+	if relativePath == "" {
+		return fmt.Errorf("hdfsx: empty relative path")
+	}
+	base := strings.TrimSuffix(w.Path, "/")
+	fullHDFS := base + "/" + relativePath
+	idx := strings.LastIndex(fullHDFS, "/")
+	if idx <= 0 {
+		return fmt.Errorf("hdfsx: invalid hdfs path %q", fullHDFS)
+	}
+	dir := fullHDFS[:idx]
+	_ = w.runHdfs(fmt.Sprintf("hdfs dfs -mkdir -p %s", dir)).Run()
+
+	ts := time.Now().UnixMilli()
+	tmp := fmt.Sprintf("/tmp/derived_%d.jsonl", ts)
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(f)
+	for _, ev := range events {
+		if err := enc.Encode(ev); err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	_ = f.Close()
+	err = w.runHdfs(fmt.Sprintf("hdfs dfs -put -f %s %s", tmp, fullHDFS)).Run()
+	_ = os.Remove(tmp)
+	return err
+}
+
+// CatFile membaca seluruh isi file di HDFS (untuk replay).
+func (w *Writer) CatFile(hdfsPath string) ([]byte, error) {
+	return w.runHdfs(fmt.Sprintf("hdfs dfs -cat %s", hdfsPath)).Output()
+}
+
+// ListRecursive menjalankan hdfs dfs -ls -R dan mengembalikan stdout (untuk replay: parse path file .jsonl).
+func (w *Writer) ListRecursive(hdfsPath string) ([]byte, error) {
+	return w.runHdfs(fmt.Sprintf("hdfs dfs -ls -R %s", hdfsPath)).Output()
+}

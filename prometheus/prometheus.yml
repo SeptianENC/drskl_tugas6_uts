@@ -10,34 +10,37 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
-  # Redis: multi-target pattern agar tiap node punya label instance sendiri
-  # Termasuk redis-4, redis-5 bila dijalankan via docker-compose-replica.yml (replica nodes)
-  - job_name: 'redis_exporter_targets'
+  # Satu job per node agar label instance = alamat Redis (mudah dipilih di Grafana).
+  - job_name: 'redis_exporter_redis1'
     static_configs:
-      - targets:
-          - redis://redis-1:7001
-          - redis://redis-2:7002
-          - redis://redis-3:7003
-          - redis://redis-4:7004
-          - redis://redis-5:7005
+      - targets: ['redis-exporter-1:9121']
         labels:
           component: 'redis-cluster'
           storage_type: 'in-memory-cache'
-    metrics_path: /scrape
-    relabel_configs:
-      - source_labels: [__address__]
-        target_label: __param_target
-      - source_labels: [__param_target]
-        target_label: instance
-      - target_label: __address__
-        replacement: redis-exporter:9121
+          instance: 'redis-1:7001'
 
-  # Exporter sendiri (opsional, untuk uptime dll)
-  - job_name: 'redis_exporter'
+  - job_name: 'redis_exporter_redis2'
     static_configs:
-      - targets: ['redis-exporter:9121']
+      - targets: ['redis-exporter-2:9121']
         labels:
-          component: 'redis-exporter'
+          component: 'redis-cluster'
+          storage_type: 'in-memory-cache'
+          instance: 'redis-2:7002'
+
+  - job_name: 'redis_exporter_redis3'
+    static_configs:
+      - targets: ['redis-exporter-3:9121']
+        labels:
+          component: 'redis-cluster'
+          storage_type: 'in-memory-cache'
+          instance: 'redis-3:7003'
+
+  - job_name: 'joiner'
+    static_configs:
+      - targets: ['joiner:8080']
+        labels:
+          component: 'derived-data'
+    metrics_path: /metrics
 
   # HDFS exporter - metrics dari Namenode JMX
   - job_name: 'hdfs'
