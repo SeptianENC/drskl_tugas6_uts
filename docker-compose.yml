@@ -260,7 +260,7 @@ services:
       target: dashboard
     environment:
       - REDIS_STARTUP_NODES=redis-1:7001,redis-2:7002,redis-3:7003
-      - GENERATOR_RPS_HINT=100
+      - GENERATOR_RPS_HINT=200
     depends_on:
       - redis-cluster-init
     ports:
@@ -277,7 +277,7 @@ services:
     environment:
       - REDIS_STARTUP_NODES=redis-1:7001,redis-2:7002,redis-3:7003
       - HDFS_PATH=/derived
-      - MATERIALIZE_INTERVAL_SECONDS=3
+      - MATERIALIZE_INTERVAL_SECONDS=2
       - MATERIALIZE_BATCH_SIZE=500
     depends_on:
       - redis-cluster-init
@@ -300,7 +300,8 @@ services:
       - INGESTOR_URL=http://ingestor:8080
       - ENABLE_LEGACY_INGESTOR=0
       - HOTKEY_RATIO=0.20
-      - RPS=100
+      - RPS=200
+      - GENERATOR_RESET_SPEED_MODE=1
     depends_on:
       - joiner
       - ingestor

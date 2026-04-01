@@ -239,46 +239,78 @@ const pageHTML = `<!DOCTYPE html>
       line-height: 1.45;
       max-width: 58rem;
     }
-    .toolbar {
+    .speed-panel {
+      background: linear-gradient(180deg, #1c2128 0%, #161b22 100%);
+      border: 2px solid #30363d;
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .speed-row {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 0.75rem;
+      gap: 1rem;
     }
-    .btn {
+    .speed-badge {
+      font-size: 0.95rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      padding: 0.5rem 1rem;
+      border-radius: 8px;
+      min-width: 200px;
+      text-align: center;
+    }
+    .speed-badge.speed-fast {
+      background: #238636;
+      color: #fff;
+      border: 1px solid #3fb950;
+    }
+    .speed-badge.speed-slow {
+      background: #9e6a03;
+      color: #fff;
+      border: 1px solid #d29922;
+    }
+    .btn-speed {
       cursor: pointer;
       font: inherit;
-      padding: 0.45rem 0.9rem;
-      border-radius: 8px;
-      border: 1px solid var(--border);
+      font-size: 1rem;
+      font-weight: 600;
+      padding: 0.65rem 1.25rem;
+      min-height: 48px;
+      border-radius: 10px;
+      border: 2px solid #58a6ff;
       background: #21262d;
-      color: var(--text);
+      color: #e6edf3;
+      flex: 1;
+      min-width: 260px;
+      max-width: 420px;
     }
-    .btn:hover { background: #30363d; }
-    .btn.on {
-      background: #238636;
-      border-color: #3fb950;
-      color: #fff;
+    .btn-speed:hover { background: #30363d; }
+    .btn-speed:active { transform: scale(0.99); }
+    .speed-help {
+      margin: 0.75rem 0 0;
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.45;
     }
-    .toolbar .hint { font-size: 0.78rem; color: var(--muted); max-width: 36rem; line-height: 1.4; }
   </style>
 </head>
 <body>
   <header>
     <h1>Derived data — aktivitas pipeline (live)</h1>
-    <p>
-      Data turunan (training examples, file di HDFS) tidak terlihat langsung. Layar ini menampilkan
-      alur <strong>ingestion</strong> (Part 2), <strong>join stream</strong>, <strong>materialization</strong> batch,
-      dan <strong>offload</strong> Redis→HDFS lewat jejak peristiwa yang sama untuk semua layanan.
-    </p>
     <div class="meta" id="clock">Memuat…</div>
   </header>
   <main>
-    <div class="toolbar">
-      <button type="button" class="btn" id="btnSlow" title="Alihkan slow motion">Slow motion: …</button>
-      <span class="hint" id="rpsHint">Cepat ≈ target RPS concurrent (env <code>RPS</code> di generator). Slow = satu pasangan demi satu dengan jeda panjang agar mudah dibaca.</span>
-    </div>
+    <section class="speed-panel" aria-label="Kecepatan generator">
+      <div class="speed-row">
+        <div class="speed-badge speed-fast" id="modeBadge">MODE: CEPAT</div>
+        <button type="button" class="btn-speed" id="btnSpeedToggle">
+          Aktifkan slow motion…
+        </button>
+      </div>
+      <p class="speed-help" id="rpsHint">Default = mode cepat. Slow motion = satu pasangan feature+action dengan jeda panjang (mudah dibaca di feed).</p>
+    </section>
     <div class="legend">
       <span class="l-ingest">Ingestor (KV / overflow)</span>
       <span class="l-join">Joiner (feature + action)</span>
@@ -336,15 +368,25 @@ const pageHTML = `<!DOCTYPE html>
         document.getElementById("clock").textContent = "Update: " + (d.ts || "") + " · auto-refresh 1.2s";
         var h = document.getElementById("metricHelp");
         if (h && d.help_grafana_vs_dashboard) { h.textContent = d.help_grafana_vs_dashboard; }
-        var b = document.getElementById("btnSlow");
+        var sm = !!d.slow_motion;
+        var badge = document.getElementById("modeBadge");
+        if (badge) {
+          badge.textContent = sm ? "MODE: SLOW MOTION" : "MODE: CEPAT";
+          badge.className = sm ? "speed-badge speed-slow" : "speed-badge speed-fast";
+        }
+        var b = document.getElementById("btnSpeedToggle");
         if (b) {
-          var sm = !!d.slow_motion;
-          b.textContent = sm ? "Slow motion: ON (klik untuk cepat)" : "Slow motion: OFF (klik untuk lambat)";
-          b.className = sm ? "btn on" : "btn";
+          b.textContent = sm
+            ? "Kembali ke mode cepat (≈ " + (d.generator_rps_hint || "?") + " pasangan/detik)"
+            : "Aktifkan slow motion (satu per satu, jeda panjang)";
         }
         var rh = document.getElementById("rpsHint");
-        if (rh && d.generator_rps_hint) {
-          rh.innerHTML = "Cepat ≈ <strong>" + escapeHtml(d.generator_rps_hint) + "</strong> pasangan feature+action/detik (concurrent). Slow = satu pasangan dengan jeda panjang.";
+        if (rh) {
+          var hint = "Mode cepat = default (banyak pasangan concurrent). Klik tombol di atas hanya untuk demo lambat.";
+          if (d.generator_rps_hint) {
+            hint = "Target mode cepat: <strong>" + escapeHtml(d.generator_rps_hint) + "</strong> pasangan feature+action per detik (set <code>RPS</code> di service generator). " + hint;
+          }
+          rh.innerHTML = hint;
         }
         renderCards(d);
         renderFeed(d.feed);
@@ -352,7 +394,7 @@ const pageHTML = `<!DOCTYPE html>
         document.getElementById("clock").textContent = "Error: " + e;
       }
     }
-    document.getElementById("btnSlow").addEventListener("click", async function() {
+    document.getElementById("btnSpeedToggle").addEventListener("click", async function() {
       try {
         const r = await fetch("/api/state");
         const d = await r.json();

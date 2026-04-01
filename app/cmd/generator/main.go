@@ -60,7 +60,7 @@ func main() {
 	ingestorURL := os.Getenv("INGESTOR_URL")
 	legacyIngest := os.Getenv("ENABLE_LEGACY_INGESTOR") == "1"
 
-	rps := getInt("RPS", 100)
+	rps := getInt("RPS", 200)
 	if rps < 1 {
 		rps = 1
 	}
@@ -74,6 +74,11 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 	rdb := redisx.NewCluster()
 	ctx := context.Background()
+
+	// Bersihkan flag slow_motion di Redis saat start (default aktif di compose) agar deploy baru tidak "terjebak" mode lambat dari sesi lalu.
+	if os.Getenv("GENERATOR_RESET_SPEED_MODE") != "0" {
+		_ = rdb.Del(ctx, pipeline.RedisKeySlowMotion).Err()
+	}
 
 	var pairCounter uint64
 
@@ -109,7 +114,7 @@ func main() {
 
 func delayFast() time.Duration {
 	// Sangat pendek: overlap banyak request → throughput mendekati RPS.
-	return time.Duration(rand.Intn(35)) * time.Millisecond
+	return time.Duration(rand.Intn(20)) * time.Millisecond
 }
 
 func delayDDIA() time.Duration {
